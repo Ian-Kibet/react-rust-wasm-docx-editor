@@ -1,0 +1,25 @@
+mod document;
+
+pub use document::{
+    Alignment,
+    BlockElement,
+    Border,
+    Document,
+    Footer,
+    Header,
+    ImageData,
+    ListDef,
+    ListLevel,
+    NumberingRef,
+    Paragraph,
+    ParagraphProperties,
+    Run,
+    RunProperties,
+    StyleDef,
+    Table,
+    TableBorders,
+    TableCell,
+    TableCellProperties,
+    TableProperties,
+    TableRow,
+};

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+target/
+pkg/
+app/src/wasm/pkg/
+*.wasm
+.DS_Store

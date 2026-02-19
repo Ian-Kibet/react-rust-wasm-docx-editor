@@ -1,0 +1,11 @@
+{
+  "name": "react-docx-wa-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build:wasm": "bash scripts/build-wasm.sh",
+    "dev": "npm run build:wasm && cd app && npx vite",
+    "build": "npm run build:wasm && cd app && npx vite build",
+    "preview": "cd app && npx vite preview"
+  }
+}

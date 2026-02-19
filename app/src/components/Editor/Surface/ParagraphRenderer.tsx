@@ -38,6 +38,46 @@ const ParagraphRenderer: React.FC<ParagraphRendererProps> = React.memo(
       style.textIndent = `${properties.indent_first_line}pt`;
     }
 
+    if (properties.indent_hanging != null) {
+      style.textIndent = `-${properties.indent_hanging}pt`;
+      style.paddingLeft = `${(properties.indent_left ?? 0) + properties.indent_hanging}pt`;
+    }
+
+    // Line spacing
+    if (properties.line_spacing != null) {
+      const rule = properties.line_spacing_rule ?? 'auto';
+      if (rule === 'auto') {
+        style.lineHeight = String(properties.line_spacing / 240);
+      } else if (rule === 'exact') {
+        style.lineHeight = `${properties.line_spacing / 20}pt`;
+      } else if (rule === 'at_least') {
+        style.lineHeight = `${properties.line_spacing / 20}pt`;
+      }
+    }
+
+    // Page break before
+    if (properties.page_break_before) {
+      style.pageBreakBefore = 'always';
+    }
+
+    // Paragraph shading
+    if (properties.shading) {
+      style.backgroundColor = properties.shading.startsWith('#')
+        ? properties.shading
+        : `#${properties.shading}`;
+    }
+
+    // Paragraph borders
+    if (properties.border_top) {
+      const b = properties.border_top;
+      style.borderTop = `${Math.max(1, b.size)}px ${b.style || 'solid'} ${b.color.startsWith('#') ? b.color : `#${b.color}`}`;
+    }
+
+    if (properties.border_bottom) {
+      const b = properties.border_bottom;
+      style.borderBottom = `${Math.max(1, b.size)}px ${b.style || 'solid'} ${b.color.startsWith('#') ? b.color : `#${b.color}`}`;
+    }
+
     // Render runs, or a <br> for empty paragraphs so they still have height.
     const children =
       paragraph.runs.length > 0 ? (

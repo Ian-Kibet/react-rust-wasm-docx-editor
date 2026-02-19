@@ -10,3 +10,5 @@ export interface EditorSelection {
   focus: SelectionPoint;
   is_collapsed: boolean;
 }
+
+export type EditingZone = 'body' | 'header' | 'footer';

@@ -7,12 +7,17 @@ import { Ribbon } from './components/Editor/Ribbon/Ribbon';
 import { Ruler } from './components/Editor/Ruler/Ruler';
 import EditSurface from './components/Editor/Surface/EditSurface';
 import { Sidebar } from './components/Editor/Sidebar/Sidebar';
+import { FindReplacePanel } from './components/Editor/FindReplace/FindReplacePanel';
+import { StatusBar } from './components/Editor/StatusBar/StatusBar';
+import { FootnoteRenderer } from './components/Editor/Footnotes/FootnoteRenderer';
+import { PrintPreview } from './components/PrintPreview/PrintPreview';
 import { DocxDocument, Paragraph } from './types/document';
 
 export const App: React.FC = () => {
   const { ready, error } = useWasm();
   const { state, dispatch } = useDocumentModel();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [showPrintPreview, setShowPrintPreview] = useState(false);
 
   const handleLoadDocument = useCallback(
     (doc: DocxDocument) => dispatch({ type: 'load_document', payload: doc }),
@@ -28,6 +33,15 @@ export const App: React.FC = () => {
   const handleSave = useCallback(() => {
     handleDownload(state.document);
   }, [handleDownload, state.document]);
+
+  const handleZoomChange = useCallback(
+    (zoom: number) => dispatch({ type: 'set_zoom', payload: { zoom } }),
+    [dispatch],
+  );
+
+  const handleToggleFindReplace = useCallback(() => {
+    dispatch({ type: 'toggle_find_replace' });
+  }, [dispatch]);
 
   const selectedParagraph = useMemo((): Paragraph | null => {
     if (!state.selection) return null;
@@ -58,6 +72,16 @@ export const App: React.FC = () => {
     );
   }
 
+  if (showPrintPreview) {
+    return (
+      <PrintPreview
+        document={state.document}
+        images={state.document.images}
+        onClose={() => setShowPrintPreview(false)}
+      />
+    );
+  }
+
   return (
     <div className="app-container">
       <FileBar
@@ -84,6 +108,15 @@ export const App: React.FC = () => {
             selection={state.selection}
             dispatch={dispatch}
             images={state.document.images}
+            onSave={handleSave}
+            onToggleFindReplace={handleToggleFindReplace}
+            zoom={state.zoom}
+            sectionProperties={state.document.section_properties}
+          />
+          <FootnoteRenderer
+            footnotes={state.document.footnotes ?? []}
+            endnotes={state.document.endnotes ?? []}
+            images={state.document.images}
           />
         </div>
         <Sidebar
@@ -91,8 +124,22 @@ export const App: React.FC = () => {
           selection={state.selection}
           collapsed={sidebarCollapsed}
           onToggle={() => setSidebarCollapsed((c) => !c)}
+          dispatch={dispatch}
         />
       </div>
+      {state.find_replace_open && (
+        <FindReplacePanel
+          document={state.document}
+          dispatch={dispatch}
+          onClose={handleToggleFindReplace}
+        />
+      )}
+      <StatusBar
+        document={state.document}
+        selection={state.selection}
+        zoom={state.zoom}
+        onZoomChange={handleZoomChange}
+      />
     </div>
   );
 };

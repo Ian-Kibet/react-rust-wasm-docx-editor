@@ -2,21 +2,16 @@ use quick_xml::events::Event;
 use quick_xml::Reader;
 
 use crate::model::{
-    Alignment, ParagraphProperties, RunProperties, StyleDef,
+    Alignment, LineSpacingRule, ParagraphProperties, RunProperties, StyleDef,
 };
 use super::ParseError;
 
 /// Parse `word/styles.xml` into a vector of style definitions.
-///
-/// Each `<w:style>` element is converted into a `StyleDef`. We capture the
-/// style id, name, type, basedOn reference, and any embedded paragraph or run
-/// properties.
 pub fn parse_styles(xml: &str) -> Result<Vec<StyleDef>, ParseError> {
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut styles: Vec<StyleDef> = Vec::new();
 
-    // Parsing state
     let mut current_style: Option<StyleBuilder> = None;
     let mut in_name = false;
     let mut in_rpr = false;
@@ -40,7 +35,6 @@ pub fn parse_styles(xml: &str) -> Result<Vec<StyleDef>, ParseError> {
                                         String::from_utf8_lossy(&attr.value).to_string();
                                 }
                                 b"default" => {
-                                    // w:default="1" means this is the default style for its type
                                     let val = String::from_utf8_lossy(&attr.value);
                                     builder.is_default = val == "1" || val == "true";
                                 }
@@ -51,7 +45,6 @@ pub fn parse_styles(xml: &str) -> Result<Vec<StyleDef>, ParseError> {
                     }
                     b"name" if current_style.is_some() => {
                         in_name = true;
-                        // The name is typically in the val attribute
                         if let Some(ref mut s) = current_style {
                             for attr in e.attributes().flatten() {
                                 if attr.key.local_name().as_ref() == b"val" {
@@ -187,8 +180,6 @@ impl StyleBuilder {
     }
 }
 
-/// Handle property child elements that may appear inside either `<w:rPr>` or
-/// `<w:pPr>`, or directly under `<w:style>` as self-closing shorthand.
 fn handle_property_element(
     e: &quick_xml::events::BytesStart<'_>,
     current_style: &mut Option<StyleBuilder>,
@@ -204,10 +195,25 @@ fn handle_property_element(
     if in_rpr {
         s.has_rpr = true;
         match local.as_ref() {
-            b"b" => s.rpr.bold = Some(true),
-            b"i" => s.rpr.italic = Some(true),
+            b"b" => s.rpr.bold = Some(!is_val_false(e)),
+            b"i" => s.rpr.italic = Some(!is_val_false(e)),
             b"u" => s.rpr.underline = Some(true),
-            b"strike" => s.rpr.strikethrough = Some(true),
+            b"strike" => s.rpr.strikethrough = Some(!is_val_false(e)),
+            b"dstrike" => s.rpr.double_strikethrough = Some(!is_val_false(e)),
+            b"smallCaps" => s.rpr.small_caps = Some(!is_val_false(e)),
+            b"caps" => s.rpr.all_caps = Some(!is_val_false(e)),
+            b"vertAlign" => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.local_name().as_ref() == b"val" {
+                        let val = String::from_utf8_lossy(&attr.value);
+                        match val.as_ref() {
+                            "superscript" => s.rpr.superscript = Some(true),
+                            "subscript" => s.rpr.subscript = Some(true),
+                            _ => {}
+                        }
+                    }
+                }
+            }
             b"sz" => {
                 for attr in e.attributes().flatten() {
                     if attr.key.local_name().as_ref() == b"val" {
@@ -245,6 +251,25 @@ fn handle_property_element(
                     }
                 }
             }
+            b"shd" => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.local_name().as_ref() == b"fill" {
+                        let fill = String::from_utf8_lossy(&attr.value).to_string();
+                        if fill != "auto" {
+                            s.rpr.background_color = Some(fill);
+                        }
+                    }
+                }
+            }
+            b"spacing" => {
+                for attr in e.attributes().flatten() {
+                    if attr.key.local_name().as_ref() == b"val" {
+                        if let Ok(v) = String::from_utf8_lossy(&attr.value).parse::<f64>() {
+                            s.rpr.spacing = Some(v);
+                        }
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -277,6 +302,17 @@ fn handle_property_element(
                                 s.ppr.spacing_after = Some(v);
                             }
                         }
+                        b"line" => {
+                            if let Ok(v) =
+                                String::from_utf8_lossy(&attr.value).parse::<f64>()
+                            {
+                                s.ppr.line_spacing = Some(v);
+                            }
+                        }
+                        b"lineRule" => {
+                            let val = String::from_utf8_lossy(&attr.value);
+                            s.ppr.line_spacing_rule = Some(parse_line_spacing_rule(&val));
+                        }
                         _ => {}
                     }
                 }
@@ -284,14 +320,14 @@ fn handle_property_element(
             b"ind" => {
                 for attr in e.attributes().flatten() {
                     match attr.key.local_name().as_ref() {
-                        b"left" => {
+                        b"left" | b"start" => {
                             if let Ok(v) =
                                 String::from_utf8_lossy(&attr.value).parse::<f64>()
                             {
                                 s.ppr.indent_left = Some(v);
                             }
                         }
-                        b"right" => {
+                        b"right" | b"end" => {
                             if let Ok(v) =
                                 String::from_utf8_lossy(&attr.value).parse::<f64>()
                             {
@@ -305,9 +341,28 @@ fn handle_property_element(
                                 s.ppr.indent_first_line = Some(v);
                             }
                         }
+                        b"hanging" => {
+                            if let Ok(v) =
+                                String::from_utf8_lossy(&attr.value).parse::<f64>()
+                            {
+                                s.ppr.indent_hanging = Some(v);
+                            }
+                        }
                         _ => {}
                     }
                 }
+            }
+            b"pageBreakBefore" => {
+                s.ppr.page_break_before = Some(!is_val_false(e));
+            }
+            b"keepNext" => {
+                s.ppr.keep_next = Some(!is_val_false(e));
+            }
+            b"keepLines" => {
+                s.ppr.keep_lines = Some(!is_val_false(e));
+            }
+            b"widowControl" => {
+                s.ppr.widow_control = Some(!is_val_false(e));
             }
             _ => {}
         }
@@ -332,4 +387,22 @@ pub(crate) fn parse_alignment(val: &str) -> Alignment {
         "both" | "justify" => Alignment::Justify,
         _ => Alignment::Left,
     }
+}
+
+fn parse_line_spacing_rule(val: &str) -> LineSpacingRule {
+    match val {
+        "exact" => LineSpacingRule::Exact,
+        "atLeast" => LineSpacingRule::AtLeast,
+        _ => LineSpacingRule::Auto,
+    }
+}
+
+fn is_val_false(e: &quick_xml::events::BytesStart<'_>) -> bool {
+    for attr in e.attributes().flatten() {
+        if attr.key.local_name().as_ref() == b"val" {
+            let v = String::from_utf8_lossy(&attr.value);
+            return v == "false" || v == "0";
+        }
+    }
+    false
 }

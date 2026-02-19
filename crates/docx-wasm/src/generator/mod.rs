@@ -1,5 +1,7 @@
+pub mod comments_xml;
 pub mod content_types;
 pub mod document_xml;
+pub mod footnotes_xml;
 pub mod header_footer_xml;
 pub mod media;
 pub mod numbering_xml;
@@ -35,13 +37,12 @@ pub fn generate(doc: &Document) -> Result<Vec<u8>, GenerateError> {
     // ------------------------------------------------------------------
     // 1. Build the relationship map so every part knows its rId
     // ------------------------------------------------------------------
-    let (doc_rels, _next_rid) = rels_xml::build_document_rels(doc, 1);
+    let (doc_rels, _next_rid, hyperlink_rid_map) = rels_xml::build_document_rels(doc, 1);
 
     // Build an image-id -> rId lookup for the document XML writer
     let mut image_rid_map: HashMap<String, String> = HashMap::new();
     for rel in &doc_rels {
         if rel.rel_type.ends_with("/image") {
-            // Target looks like "media/{id}.{ext}" -- extract the image id
             if let Some(filename) = rel.target.strip_prefix("media/") {
                 if let Some(dot) = filename.rfind('.') {
                     let img_id = &filename[..dot];
@@ -71,8 +72,13 @@ pub fn generate(doc: &Document) -> Result<Vec<u8>, GenerateError> {
     let package_rels_xml = rels_xml::generate_package_rels()?;
     let document_rels_xml = rels_xml::generate_document_rels(&doc_rels)?;
 
-    let document_xml =
-        document_xml::generate_document_xml(doc, &image_rid_map, &header_rids, &footer_rids)?;
+    let document_xml = document_xml::generate_document_xml(
+        doc,
+        &image_rid_map,
+        &hyperlink_rid_map,
+        &header_rids,
+        &footer_rids,
+    )?;
     let styles_xml = styles_xml::generate_styles_xml(doc)?;
 
     let numbering_xml = if !doc.numbering.is_empty() {
@@ -81,17 +87,36 @@ pub fn generate(doc: &Document) -> Result<Vec<u8>, GenerateError> {
         None
     };
 
+    let comments_xml = if !doc.comments.is_empty() {
+        Some(comments_xml::generate_comments_xml(&doc.comments)?)
+    } else {
+        None
+    };
+
+    let footnotes_xml = if !doc.footnotes.is_empty() {
+        Some(footnotes_xml::generate_footnotes_xml(&doc.footnotes)?)
+    } else {
+        None
+    };
+
+    let endnotes_xml = if !doc.endnotes.is_empty() {
+        Some(footnotes_xml::generate_endnotes_xml(&doc.endnotes)?)
+    } else {
+        None
+    };
+
     // Headers
+    let empty_hyperlink_map: HashMap<String, String> = HashMap::new();
     let mut header_parts: Vec<(String, Vec<u8>)> = Vec::new();
     for (i, header) in doc.headers.iter().enumerate() {
-        let xml = header_footer_xml::generate_header_xml(header, &image_rid_map)?;
+        let xml = header_footer_xml::generate_header_xml(header, &image_rid_map, &empty_hyperlink_map)?;
         header_parts.push((format!("word/header{}.xml", i + 1), xml));
     }
 
     // Footers
     let mut footer_parts: Vec<(String, Vec<u8>)> = Vec::new();
     for (i, footer) in doc.footers.iter().enumerate() {
-        let xml = header_footer_xml::generate_footer_xml(footer, &image_rid_map)?;
+        let xml = header_footer_xml::generate_footer_xml(footer, &image_rid_map, &empty_hyperlink_map)?;
         footer_parts.push((format!("word/footer{}.xml", i + 1), xml));
     }
 
@@ -103,46 +128,37 @@ pub fn generate(doc: &Document) -> Result<Vec<u8>, GenerateError> {
     // ------------------------------------------------------------------
     // 4. Assemble all parts into a list for the ZIP writer
     // ------------------------------------------------------------------
-    let mut parts: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut owned_parts: Vec<(String, Vec<u8>)> = Vec::new();
 
-    // Package-level
-    parts.push(("[Content_Types].xml", content_types_xml));
-    parts.push(("_rels/.rels", package_rels_xml));
-
-    // Word directory
-    parts.push(("word/_rels/document.xml.rels", document_rels_xml));
-    parts.push(("word/document.xml", document_xml));
-    parts.push(("word/styles.xml", styles_xml));
+    owned_parts.push(("[Content_Types].xml".to_string(), content_types_xml));
+    owned_parts.push(("_rels/.rels".to_string(), package_rels_xml));
+    owned_parts.push(("word/_rels/document.xml.rels".to_string(), document_rels_xml));
+    owned_parts.push(("word/document.xml".to_string(), document_xml));
+    owned_parts.push(("word/styles.xml".to_string(), styles_xml));
 
     if let Some(num_xml) = numbering_xml {
-        parts.push(("word/numbering.xml", num_xml));
+        owned_parts.push(("word/numbering.xml".to_string(), num_xml));
     }
 
-    // Owned string paths for headers/footers -- we need to keep them alive
-    // while `parts` borrows them, so collect references after pushing.
-    let header_footer_owned: Vec<(String, Vec<u8>)> = header_parts
-        .into_iter()
-        .chain(footer_parts)
-        .collect();
+    if let Some(comments) = comments_xml {
+        owned_parts.push(("word/comments.xml".to_string(), comments));
+    }
 
-    // We cannot push &str from owned Strings directly into parts because of
-    // lifetime issues, so we build the final list differently.
-    let final_parts: Vec<(&str, Vec<u8>)> = parts;
+    if let Some(footnotes) = footnotes_xml {
+        owned_parts.push(("word/footnotes.xml".to_string(), footnotes));
+    }
 
-    // We need a slightly different approach for owned paths. Let's build a
-    // helper vec that owns the strings and we reference them.
-    // Actually, the simplest approach is to use the zip_writer with a
-    // slightly modified interface. Let's just collect everything as owned.
-    let mut owned_parts: Vec<(String, Vec<u8>)> = final_parts
-        .into_iter()
-        .map(|(path, data)| (path.to_string(), data))
-        .collect();
+    if let Some(endnotes) = endnotes_xml {
+        owned_parts.push(("word/endnotes.xml".to_string(), endnotes));
+    }
 
-    for (path, data) in header_footer_owned {
+    for (path, data) in header_parts {
+        owned_parts.push((path, data));
+    }
+    for (path, data) in footer_parts {
         owned_parts.push((path, data));
     }
 
-    // Media
     for mf in media_files {
         owned_parts.push((mf.path, mf.data));
     }

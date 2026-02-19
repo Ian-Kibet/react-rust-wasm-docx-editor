@@ -53,6 +53,33 @@ pub fn generate_content_types(doc: &Document) -> Result<Vec<u8>, GenerateError> 
         )?;
     }
 
+    // Comments
+    if !doc.comments.is_empty() {
+        write_override(
+            &mut writer,
+            "/word/comments.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.comments+xml",
+        )?;
+    }
+
+    // Footnotes
+    if !doc.footnotes.is_empty() {
+        write_override(
+            &mut writer,
+            "/word/footnotes.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.footnotes+xml",
+        )?;
+    }
+
+    // Endnotes
+    if !doc.endnotes.is_empty() {
+        write_override(
+            &mut writer,
+            "/word/endnotes.xml",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.endnotes+xml",
+        )?;
+    }
+
     for (i, _header) in doc.headers.iter().enumerate() {
         let part = format!("/word/header{}.xml", i + 1);
         write_override(

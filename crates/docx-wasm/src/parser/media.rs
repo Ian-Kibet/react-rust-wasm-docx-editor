@@ -42,6 +42,7 @@ pub fn extract_images(
             content_type,
             width: None,
             height: None,
+            description: None,
         });
     }
 

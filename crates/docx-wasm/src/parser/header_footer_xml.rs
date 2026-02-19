@@ -13,9 +13,6 @@ use super::styles_xml::parse_alignment;
 use super::ParseError;
 
 /// Parse a header XML file (e.g. `word/header1.xml`) into a `Header`.
-///
-/// The structure mirrors `word/document.xml` but with `<w:hdr>` as the root
-/// instead of `<w:document>`.  We reuse the same paragraph/run parsing logic.
 pub fn parse_header(
     xml: &str,
     rels: &RelsMap,
@@ -45,10 +42,6 @@ pub fn parse_footer(
 // Shared header/footer body parser
 // ---------------------------------------------------------------------------
 
-/// Headers and footers share the same internal XML structure as the document
-/// body: a sequence of `<w:p>` paragraphs.  We parse them with a simplified
-/// version of the document parser (no tables for now -- headers/footers rarely
-/// contain them, but paragraphs and runs are fully supported).
 fn parse_header_footer_body(
     xml: &str,
     rels: &RelsMap,
@@ -59,7 +52,6 @@ fn parse_header_footer_body(
 
     let mut elements: Vec<BlockElement> = Vec::new();
 
-    // State machine
     let mut current_para: Option<ParaBuilder> = None;
     let mut current_run: Option<HfRunBuilder> = None;
     let mut in_ppr = false;
@@ -67,6 +59,10 @@ fn parse_header_footer_body(
     let mut in_text = false;
     let mut in_numpr = false;
     let mut in_drawing = false;
+    let mut in_hyperlink = false;
+    let mut hyperlink_url: Option<String> = None;
+    let mut hyperlink_tooltip: Option<String> = None;
+    let mut in_pbdr = false;
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -82,8 +78,37 @@ fn parse_header_footer_body(
                     b"numPr" if in_ppr => {
                         in_numpr = true;
                     }
+                    b"pBdr" if in_ppr => {
+                        in_pbdr = true;
+                    }
+                    b"hyperlink" if current_para.is_some() => {
+                        in_hyperlink = true;
+                        hyperlink_url = None;
+                        hyperlink_tooltip = None;
+                        for attr in e.attributes().flatten() {
+                            match attr.key.local_name().as_ref() {
+                                b"id" => {
+                                    let rel_id = String::from_utf8_lossy(&attr.value).to_string();
+                                    if let Some(target) = rels.get(&rel_id) {
+                                        hyperlink_url = Some(target.clone());
+                                    }
+                                }
+                                b"tooltip" => {
+                                    hyperlink_tooltip = Some(
+                                        String::from_utf8_lossy(&attr.value).to_string(),
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                     b"r" if current_para.is_some() => {
-                        current_run = Some(HfRunBuilder::new());
+                        let mut rb = HfRunBuilder::new();
+                        if in_hyperlink {
+                            rb.properties.hyperlink_url = hyperlink_url.clone();
+                            rb.properties.hyperlink_tooltip = hyperlink_tooltip.clone();
+                        }
+                        current_run = Some(rb);
                     }
                     b"rPr" if current_run.is_some() => {
                         in_rpr = true;
@@ -109,9 +134,16 @@ fn parse_header_footer_body(
                 }
 
                 // Paragraph properties
-                if in_ppr && !in_numpr {
+                if in_ppr && !in_numpr && !in_pbdr {
                     if let Some(ref mut para) = current_para {
                         handle_para_property(e, &mut para.properties);
+                    }
+                }
+
+                // Paragraph borders
+                if in_pbdr {
+                    if let Some(ref mut para) = current_para {
+                        handle_para_border(e, &mut para.properties);
                     }
                 }
 
@@ -119,6 +151,37 @@ fn parse_header_footer_body(
                 if in_numpr {
                     if let Some(ref mut para) = current_para {
                         handle_numpr_property(e, &mut para.properties);
+                    }
+                }
+
+                // Line/page break and tab inside a run
+                if current_run.is_some() && !in_rpr {
+                    match local.as_ref() {
+                        b"br" => {
+                            if let Some(ref mut run) = current_run {
+                                let mut is_page = false;
+                                for attr in e.attributes().flatten() {
+                                    if attr.key.local_name().as_ref() == b"type" {
+                                        let val = String::from_utf8_lossy(&attr.value);
+                                        if val == "page" {
+                                            is_page = true;
+                                        }
+                                    }
+                                }
+                                if is_page {
+                                    run.properties.page_break = Some(true);
+                                } else {
+                                    run.properties.line_break = Some(true);
+                                }
+                            }
+                        }
+                        b"tab" => {
+                            if let Some(ref mut run) = current_run {
+                                run.properties.tab = Some(true);
+                                run.text.push('\t');
+                            }
+                        }
+                        _ => {}
                     }
                 }
 
@@ -156,9 +219,7 @@ fn parse_header_footer_body(
                 let local = e.local_name();
                 match local.as_ref() {
                     b"p" => {
-                        // Flush pending run
                         flush_hf_run(&mut current_run, &mut current_para);
-
                         if let Some(pb) = current_para.take() {
                             elements.push(BlockElement::Paragraph(pb.build()));
                         }
@@ -166,10 +227,16 @@ fn parse_header_footer_body(
                     b"r" => {
                         flush_hf_run(&mut current_run, &mut current_para);
                     }
+                    b"hyperlink" => {
+                        in_hyperlink = false;
+                        hyperlink_url = None;
+                        hyperlink_tooltip = None;
+                    }
                     b"t" => in_text = false,
                     b"pPr" => in_ppr = false,
                     b"rPr" => in_rpr = false,
                     b"numPr" => in_numpr = false,
+                    b"pBdr" => in_pbdr = false,
                     b"drawing" => in_drawing = false,
                     _ => {}
                 }
@@ -209,6 +276,7 @@ impl ParaBuilder {
             id: self.id,
             properties: self.properties,
             runs: self.runs,
+            bookmarks: Vec::new(),
         }
     }
 }
@@ -243,7 +311,12 @@ fn flush_hf_run(
 ) {
     if let Some(run_builder) = current_run.take() {
         let run = run_builder.build();
-        if !run.text.is_empty() || run.properties.inline_image.is_some() {
+        if !run.text.is_empty()
+            || run.properties.inline_image.is_some()
+            || run.properties.line_break == Some(true)
+            || run.properties.page_break == Some(true)
+            || run.properties.tab == Some(true)
+        {
             if let Some(ref mut para) = current_para {
                 para.runs.push(run);
             }
@@ -265,6 +338,21 @@ fn handle_run_property(
         b"i" => props.italic = Some(!is_val_false(e)),
         b"u" => props.underline = Some(true),
         b"strike" => props.strikethrough = Some(!is_val_false(e)),
+        b"dstrike" => props.double_strikethrough = Some(!is_val_false(e)),
+        b"smallCaps" => props.small_caps = Some(!is_val_false(e)),
+        b"caps" => props.all_caps = Some(!is_val_false(e)),
+        b"vertAlign" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.local_name().as_ref() == b"val" {
+                    let val = String::from_utf8_lossy(&attr.value);
+                    match val.as_ref() {
+                        "superscript" => props.superscript = Some(true),
+                        "subscript" => props.subscript = Some(true),
+                        _ => {}
+                    }
+                }
+            }
+        }
         b"sz" => {
             for attr in e.attributes().flatten() {
                 if attr.key.local_name().as_ref() == b"val" {
@@ -302,6 +390,25 @@ fn handle_run_property(
                 }
             }
         }
+        b"shd" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.local_name().as_ref() == b"fill" {
+                    let fill = String::from_utf8_lossy(&attr.value).to_string();
+                    if fill != "auto" {
+                        props.background_color = Some(fill);
+                    }
+                }
+            }
+        }
+        b"spacing" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.local_name().as_ref() == b"val" {
+                    if let Ok(v) = String::from_utf8_lossy(&attr.value).parse::<f64>() {
+                        props.spacing = Some(v);
+                    }
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -324,6 +431,7 @@ fn handle_para_property(
             for attr in e.attributes().flatten() {
                 if attr.key.local_name().as_ref() == b"val" {
                     let val = String::from_utf8_lossy(&attr.value).to_string();
+                    props.style_id = Some(val.clone());
                     if let Some(level) = heading_level_from_style(&val) {
                         props.heading_level = Some(level);
                     }
@@ -346,6 +454,17 @@ fn handle_para_property(
                         {
                             props.spacing_after = Some(v);
                         }
+                    }
+                    b"line" => {
+                        if let Ok(v) =
+                            String::from_utf8_lossy(&attr.value).parse::<f64>()
+                        {
+                            props.line_spacing = Some(v);
+                        }
+                    }
+                    b"lineRule" => {
+                        let val = String::from_utf8_lossy(&attr.value);
+                        props.line_spacing_rule = Some(parse_line_spacing_rule(&val));
                     }
                     _ => {}
                 }
@@ -375,10 +494,52 @@ fn handle_para_property(
                             props.indent_first_line = Some(v);
                         }
                     }
+                    b"hanging" => {
+                        if let Ok(v) =
+                            String::from_utf8_lossy(&attr.value).parse::<f64>()
+                        {
+                            props.indent_hanging = Some(v);
+                        }
+                    }
                     _ => {}
                 }
             }
         }
+        b"pageBreakBefore" => {
+            props.page_break_before = Some(!is_val_false(e));
+        }
+        b"keepNext" => {
+            props.keep_next = Some(!is_val_false(e));
+        }
+        b"keepLines" => {
+            props.keep_lines = Some(!is_val_false(e));
+        }
+        b"widowControl" => {
+            props.widow_control = Some(!is_val_false(e));
+        }
+        b"shd" => {
+            for attr in e.attributes().flatten() {
+                if attr.key.local_name().as_ref() == b"fill" {
+                    let fill = String::from_utf8_lossy(&attr.value).to_string();
+                    if fill != "auto" {
+                        props.shading = Some(fill);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_para_border(
+    e: &quick_xml::events::BytesStart<'_>,
+    props: &mut ParagraphProperties,
+) {
+    let local = e.local_name();
+    let border = parse_border(e);
+    match local.as_ref() {
+        b"bottom" => props.border_bottom = Some(border),
+        b"top" => props.border_top = Some(border),
         _ => {}
     }
 }
@@ -443,4 +604,38 @@ fn is_val_false(e: &quick_xml::events::BytesStart<'_>) -> bool {
         }
     }
     false
+}
+
+fn parse_border(e: &quick_xml::events::BytesStart<'_>) -> crate::model::Border {
+    let mut border = crate::model::Border {
+        style: String::new(),
+        size: 0.0,
+        color: String::new(),
+    };
+    for attr in e.attributes().flatten() {
+        match attr.key.local_name().as_ref() {
+            b"val" => border.style = String::from_utf8_lossy(&attr.value).to_string(),
+            b"sz" => {
+                if let Ok(sz) = String::from_utf8_lossy(&attr.value).parse::<f64>() {
+                    border.size = sz;
+                }
+            }
+            b"color" => {
+                let c = String::from_utf8_lossy(&attr.value).to_string();
+                if c != "auto" {
+                    border.color = c;
+                }
+            }
+            _ => {}
+        }
+    }
+    border
+}
+
+fn parse_line_spacing_rule(val: &str) -> crate::model::LineSpacingRule {
+    match val {
+        "exact" => crate::model::LineSpacingRule::Exact,
+        "atLeast" => crate::model::LineSpacingRule::AtLeast,
+        _ => crate::model::LineSpacingRule::Auto,
+    }
 }

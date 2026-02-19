@@ -1,4 +1,6 @@
+pub mod comments_xml;
 pub mod document_xml;
+pub mod footnotes_xml;
 pub mod header_footer_xml;
 pub mod media;
 pub mod numbering_xml;
@@ -24,6 +26,10 @@ pub enum ParseError {
     Io(#[from] std::io::Error),
     #[error("Invalid document: {0}")]
     Invalid(String),
+    #[error("Encoding error: {0}")]
+    Encoding(String),
+    #[error("Missing required part: {0}")]
+    MissingPart(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -38,8 +44,10 @@ pub enum ParseError {
 /// 2. Relationship parsing
 /// 3. Media / image extraction (base64 encoded)
 /// 4. Styles and numbering definitions
-/// 5. Main document body (paragraphs, tables, images)
+/// 5. Main document body (paragraphs, tables, images, hyperlinks)
 /// 6. Headers and footers
+/// 7. Comments
+/// 8. Footnotes and endnotes
 pub fn parse(data: &[u8]) -> Result<Document, ParseError> {
     // 1. Extract all files from the ZIP archive
     let files = zip_reader::read_zip(data)?;
@@ -69,14 +77,14 @@ pub fn parse(data: &[u8]) -> Result<Document, ParseError> {
     };
 
     // 6. Parse the main document body
-    let body = match files.get("word/document.xml") {
+    let (body, section_properties) = match files.get("word/document.xml") {
         Some(data) => {
             let xml = String::from_utf8_lossy(data);
             document_xml::parse_document(&xml, &rels, &media_path_to_id)?
         }
         None => {
-            return Err(ParseError::Invalid(
-                "Missing word/document.xml".to_string(),
+            return Err(ParseError::MissingPart(
+                "word/document.xml".to_string(),
             ));
         }
     };
@@ -85,6 +93,33 @@ pub fn parse(data: &[u8]) -> Result<Document, ParseError> {
     let (headers, footers) =
         parse_headers_and_footers(&files, &rels, &media_path_to_id)?;
 
+    // 8. Parse comments (optional)
+    let comments = match files.get("word/comments.xml") {
+        Some(data) => {
+            let xml = String::from_utf8_lossy(data);
+            comments_xml::parse_comments(&xml)?
+        }
+        None => Vec::new(),
+    };
+
+    // 9. Parse footnotes (optional)
+    let footnotes = match files.get("word/footnotes.xml") {
+        Some(data) => {
+            let xml = String::from_utf8_lossy(data);
+            footnotes_xml::parse_footnotes(&xml)?
+        }
+        None => Vec::new(),
+    };
+
+    // 10. Parse endnotes (optional)
+    let endnotes = match files.get("word/endnotes.xml") {
+        Some(data) => {
+            let xml = String::from_utf8_lossy(data);
+            footnotes_xml::parse_endnotes(&xml)?
+        }
+        None => Vec::new(),
+    };
+
     Ok(Document {
         body,
         styles,
@@ -92,6 +127,10 @@ pub fn parse(data: &[u8]) -> Result<Document, ParseError> {
         images,
         headers,
         footers,
+        comments,
+        footnotes,
+        endnotes,
+        section_properties,
     })
 }
 
@@ -100,9 +139,7 @@ pub fn parse(data: &[u8]) -> Result<Document, ParseError> {
 // ---------------------------------------------------------------------------
 
 /// Discover header and footer XML files via the relationships map and parse
-/// them.  Headers have relationship type ending in `/header`, footers end in
-/// `/footer`.  We also detect them by filename pattern (`word/header*.xml`,
-/// `word/footer*.xml`).
+/// them.
 fn parse_headers_and_footers(
     files: &HashMap<String, Vec<u8>>,
     rels: &rels_xml::RelsMap,
@@ -111,7 +148,6 @@ fn parse_headers_and_footers(
     let mut headers = Vec::new();
     let mut footers = Vec::new();
 
-    // Collect header/footer paths from rels targets
     let mut header_paths: Vec<String> = Vec::new();
     let mut footer_paths: Vec<String> = Vec::new();
 
@@ -128,8 +164,6 @@ fn parse_headers_and_footers(
         }
     }
 
-    // Also scan the file map directly for header/footer files that might not
-    // appear in rels (unusual but defensive)
     for path in files.keys() {
         let lower = path.to_lowercase();
         if lower.starts_with("word/header") && lower.ends_with(".xml") {
@@ -143,11 +177,9 @@ fn parse_headers_and_footers(
         }
     }
 
-    // Sort for deterministic ordering
     header_paths.sort();
     footer_paths.sort();
 
-    // Parse each header
     for path in &header_paths {
         if let Some(data) = files.get(path.as_str()) {
             let xml = String::from_utf8_lossy(data);
@@ -157,7 +189,6 @@ fn parse_headers_and_footers(
         }
     }
 
-    // Parse each footer
     for path in &footer_paths {
         if let Some(data) = files.get(path.as_str()) {
             let xml = String::from_utf8_lossy(data);

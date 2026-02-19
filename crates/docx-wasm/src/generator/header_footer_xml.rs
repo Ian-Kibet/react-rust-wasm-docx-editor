@@ -4,7 +4,7 @@ use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, Event};
 use quick_xml::Writer;
 
 use crate::model::{Footer, Header};
-use super::document_xml::ImageRidMap;
+use super::document_xml::{ImageRidMap, HyperlinkRidMap};
 use super::GenerateError;
 
 const W_NS: &str = "http://schemas.openxmlformats.org/wordprocessingml/2006/main";
@@ -17,6 +17,7 @@ const PIC_NS: &str = "http://schemas.openxmlformats.org/drawingml/2006/picture";
 pub fn generate_header_xml(
     header: &Header,
     image_rid_map: &ImageRidMap,
+    hyperlink_rid_map: &HyperlinkRidMap,
 ) -> Result<Vec<u8>, GenerateError> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), Some("yes"))))?;
@@ -30,7 +31,7 @@ pub fn generate_header_xml(
     writer.write_event(Event::Start(root))?;
 
     for block in &header.content {
-        super::document_xml::write_block_element(&mut writer, block, image_rid_map)?;
+        super::document_xml::write_block_element(&mut writer, block, image_rid_map, hyperlink_rid_map)?;
     }
 
     writer.write_event(Event::End(BytesEnd::new("w:hdr")))?;
@@ -42,6 +43,7 @@ pub fn generate_header_xml(
 pub fn generate_footer_xml(
     footer: &Footer,
     image_rid_map: &ImageRidMap,
+    hyperlink_rid_map: &HyperlinkRidMap,
 ) -> Result<Vec<u8>, GenerateError> {
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     writer.write_event(Event::Decl(BytesDecl::new("1.0", Some("UTF-8"), Some("yes"))))?;
@@ -55,7 +57,7 @@ pub fn generate_footer_xml(
     writer.write_event(Event::Start(root))?;
 
     for block in &footer.content {
-        super::document_xml::write_block_element(&mut writer, block, image_rid_map)?;
+        super::document_xml::write_block_element(&mut writer, block, image_rid_map, hyperlink_rid_map)?;
     }
 
     writer.write_event(Event::End(BytesEnd::new("w:ftr")))?;

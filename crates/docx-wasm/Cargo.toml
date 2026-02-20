@@ -1,25 +1,26 @@
 [package]
 name = "docx-wasm"
 version = "0.1.0"
+authors = ["bokuweb <bokuweb12@gmail.com>"]
 edition = "2021"
+license-file = "../../LICENSE"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["cdylib"]
 
 [dependencies]
-wasm-bindgen = "0.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-zip = { version = "2", default-features = false, features = ["deflate"] }
-quick-xml = "0.37"
-base64 = "0.22"
+wasm-bindgen = "0.2.92"
+console_error_panic_hook = "0.1.7"
+serde_json = "1.0"
 js-sys = "0.3"
-thiserror = "2"
-uuid = { version = "1", features = ["v4", "js"] }
+docx-rs = { path = "../docx-core", features = ["wasm"] }
 
 [profile.release]
-opt-level = "s"
 lto = true
+opt-level = "s"
 codegen-units = 1
 strip = true
 

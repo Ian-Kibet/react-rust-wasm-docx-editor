@@ -1,0 +1,14 @@
+use crate::reader::OwnedAttribute;
+
+pub fn is_false(v: &str) -> bool {
+    v == "0" || v == "false"
+}
+
+pub fn read_bool(attrs: &[OwnedAttribute]) -> bool {
+    if let Some(v) = attrs.first() {
+        if is_false(&v.value) {
+            return false;
+        }
+    }
+    true
+}

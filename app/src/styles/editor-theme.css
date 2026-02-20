@@ -184,6 +184,24 @@
   background: #e8e8e8;
 }
 
+/* Margin drag handles - vertical bars at margin boundaries */
+.ruler-margin-handle {
+  position: absolute;
+  top: 0;
+  width: 4px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 3;
+  margin-left: -2px;
+  background: transparent;
+  transition: background 0.15s;
+}
+
+.ruler-margin-handle:hover,
+.ruler-margin-handle.dragging {
+  background: var(--color-primary);
+}
+
 .ruler-tick {
   position: absolute;
   bottom: 0;
@@ -336,20 +354,25 @@
   background: var(--color-bg);
 }
 
+/* Zoom wrapper */
+.edit-surface-zoom-wrapper {
+  display: flex;
+  justify-content: center;
+  width: 100%;
+}
+
 /* Edit surface */
 .edit-surface {
-  max-width: var(--editor-max-width);
   margin: 0 auto;
-  padding: 48px 64px;
   background: var(--color-surface);
   box-shadow: var(--shadow-md);
-  border-radius: var(--radius-md);
-  min-height: 1056px;
   outline: none;
   font-size: 12pt;
   line-height: 1.5;
   color: var(--color-text);
-  overflow-x: auto;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  box-sizing: border-box;
 }
 
 .edit-surface:focus {
@@ -974,6 +997,38 @@
   flex: 1;
   height: 1px;
   background: var(--color-border);
+}
+
+/* Page separator — visual break between pages */
+.page-separator {
+  position: relative;
+  margin: 0 -96px; /* extend into padding */
+  user-select: none;
+}
+
+.page-separator-shadow-bottom {
+  height: 6px;
+  background: linear-gradient(to bottom, rgba(0,0,0,0.08), transparent);
+}
+
+.page-separator-gap {
+  height: 24px;
+  background: var(--color-bg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.page-separator-label {
+  font-size: 10px;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.page-separator-shadow-top {
+  height: 6px;
+  background: linear-gradient(to top, rgba(0,0,0,0.08), transparent);
 }
 
 /* Hyperlink rendering */

@@ -42,11 +42,6 @@ type BodyChunk =
       startIndex: number;
     };
 
-/**
- * Walk the document body and group consecutive paragraphs that share the same
- * `numbering.num_id` into list chunks. Non-list paragraphs and tables pass
- * through as individual chunks.
- */
 function groupBodyChunks(body: BlockElement[]): BodyChunk[] {
   const chunks: BodyChunk[] = [];
 
@@ -65,8 +60,6 @@ function groupBodyChunks(body: BlockElement[]): BodyChunk[] {
       const numbering = para.properties.numbering;
 
       if (numbering) {
-        // Start a list group. Collect consecutive paragraphs with the same
-        // num_id.
         const numId = numbering.num_id;
         const startIndex = i;
         const paragraphs: Paragraph[] = [para];
@@ -85,10 +78,6 @@ function groupBodyChunks(body: BlockElement[]): BodyChunk[] {
           }
         }
 
-        // Determine list type from the num_id convention used by the reducer:
-        // num_id "1" = bullet, num_id "2" = numbered. For document-loaded
-        // numbering we fall back to checking the numbering definitions, but
-        // a simple heuristic works for now.
         const listType: 'bullet' | 'numbered' =
           numId === '2' ? 'numbered' : 'bullet';
 
@@ -96,13 +85,11 @@ function groupBodyChunks(body: BlockElement[]): BodyChunk[] {
         continue;
       }
 
-      // Plain paragraph (no numbering).
       chunks.push({ kind: 'paragraph', block, index: i });
       i++;
       continue;
     }
 
-    // Fallback for unknown block shapes.
     i++;
   }
 
@@ -110,7 +97,7 @@ function groupBodyChunks(body: BlockElement[]): BodyChunk[] {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: find first paragraph in a block element (walks into tables)
+// Helper: find first/last paragraph in a block element
 // ---------------------------------------------------------------------------
 
 function findFirstParagraph(block: BlockElement): Paragraph | null {
@@ -147,6 +134,49 @@ function findLastParagraph(block: BlockElement): Paragraph | null {
 }
 
 // ---------------------------------------------------------------------------
+// Page-splitting: group chunks into pages based on page_break_before and
+// page_break runs.
+// ---------------------------------------------------------------------------
+
+type PageContent = { chunks: BodyChunk[] };
+
+function splitIntoPages(chunks: BodyChunk[]): PageContent[] {
+  const pages: PageContent[] = [{ chunks: [] }];
+
+  for (const chunk of chunks) {
+    let shouldBreakBefore = false;
+
+    if (chunk.kind === 'paragraph') {
+      const para = (chunk.block as { paragraph: Paragraph }).paragraph;
+      if (para.properties.page_break_before) {
+        shouldBreakBefore = true;
+      }
+    }
+
+    if (shouldBreakBefore && pages[pages.length - 1].chunks.length > 0) {
+      pages.push({ chunks: [] });
+    }
+
+    pages[pages.length - 1].chunks.push(chunk);
+
+    // Check if any run in a paragraph chunk has a page_break
+    if (chunk.kind === 'paragraph') {
+      const para = (chunk.block as { paragraph: Paragraph }).paragraph;
+      if (para.runs.some(r => r.properties.page_break)) {
+        pages.push({ chunks: [] });
+      }
+    }
+  }
+
+  // Remove trailing empty page
+  if (pages.length > 1 && pages[pages.length - 1].chunks.length === 0) {
+    pages.pop();
+  }
+
+  return pages;
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -157,14 +187,13 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
   images,
   onSave,
   onToggleFindReplace,
-  zoom,
+  zoom = 100,
   sectionProperties,
 }) => {
   const editorRef = useRef<HTMLDivElement>(null);
   const isRestoringRef = useRef(false);
   const prevDocRef = useRef(doc);
 
-  // Context menu state
   const [contextMenu, setContextMenu] = useState<{
     x: number;
     y: number;
@@ -181,8 +210,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
     const el = editorRef.current;
     if (!el) return;
 
-    // Only update when the selection is inside the editor — clicking ribbon
-    // buttons or other UI should not clear the editor selection.
     const sel = window.getSelection();
     if (!sel || sel.rangeCount === 0) return;
     if (!el.contains(sel.anchorNode)) return;
@@ -207,8 +234,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
     const el = editorRef.current;
     if (!el || !stateSel) return;
 
-    // Only restore when document content changed — user-initiated selection
-    // changes are already reflected in the DOM.
     if (prevDocRef.current === doc) return;
     prevDocRef.current = doc;
 
@@ -240,7 +265,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         }),
       ]);
     } catch {
-      // Fallback: execCommand
       const ta = document.createElement('textarea');
       ta.value = text;
       document.body.appendChild(ta);
@@ -249,22 +273,13 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
       document.body.removeChild(ta);
     }
 
-    // Store runs in module-level variable for internal paste
     lastCopiedRuns = runs;
   }, [doc, stateSel]);
-
-  // -----------------------------------------------------------------------
-  // Clipboard: Cut
-  // -----------------------------------------------------------------------
 
   const handleCut = useCallback(async () => {
     await handleCopy();
     dispatch({ type: 'delete_range' });
   }, [handleCopy, dispatch]);
-
-  // -----------------------------------------------------------------------
-  // Clipboard: Paste
-  // -----------------------------------------------------------------------
 
   const handlePaste = useCallback(async () => {
     if (lastCopiedRuns) {
@@ -279,14 +294,10 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
           dispatch({ type: 'insert_text', payload: { text } });
         }
       } catch {
-        // Clipboard read failed — ignore
+        // Clipboard read failed
       }
     }
   }, [dispatch]);
-
-  // -----------------------------------------------------------------------
-  // Select All helper
-  // -----------------------------------------------------------------------
 
   const handleSelectAll = useCallback(() => {
     const body = doc.body;
@@ -321,17 +332,20 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
   }, [doc, dispatch]);
 
   // -----------------------------------------------------------------------
-  // Input interception
+  // Native beforeinput handler — attached via addEventListener for
+  // reliable contentEditable interception. React's synthetic onBeforeInput
+  // can miss events or provide wrong nativeEvent types in some browsers.
   // -----------------------------------------------------------------------
 
-  const handleBeforeInput = useCallback(
-    (e: React.FormEvent<HTMLDivElement>) => {
-      const event = e.nativeEvent as InputEvent;
+  useEffect(() => {
+    const el = editorRef.current;
+    if (!el) return;
 
+    const handler = (event: InputEvent) => {
       switch (event.inputType) {
         case 'insertText':
         case 'insertCompositionText': {
-          e.preventDefault();
+          event.preventDefault();
           if (event.data) {
             dispatch({ type: 'insert_text', payload: { text: event.data } });
           }
@@ -339,7 +353,7 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         }
 
         case 'deleteContentBackward': {
-          e.preventDefault();
+          event.preventDefault();
           dispatch({
             type: 'delete_text',
             payload: { direction: 'backward' },
@@ -348,7 +362,7 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         }
 
         case 'deleteContentForward': {
-          e.preventDefault();
+          event.preventDefault();
           dispatch({
             type: 'delete_text',
             payload: { direction: 'forward' },
@@ -357,21 +371,21 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         }
 
         case 'insertParagraph': {
-          e.preventDefault();
+          event.preventDefault();
           dispatch({ type: 'split_paragraph' });
           break;
         }
 
         case 'insertLineBreak': {
-          e.preventDefault();
+          event.preventDefault();
           dispatch({ type: 'insert_line_break' });
           break;
         }
 
         case 'insertFromPaste':
         case 'insertFromDrop': {
-          e.preventDefault();
-          const transfer = (event as InputEvent).dataTransfer;
+          event.preventDefault();
+          const transfer = event.dataTransfer;
           const text = transfer?.getData('text/plain') ?? event.data ?? '';
           if (text) {
             dispatch({ type: 'insert_text', payload: { text } });
@@ -380,7 +394,7 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         }
 
         case 'insertReplacementText': {
-          e.preventDefault();
+          event.preventDefault();
           if (event.data) {
             dispatch({ type: 'insert_text', payload: { text: event.data } });
           }
@@ -388,14 +402,16 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         }
 
         default:
-          // Prevent all unhandled input types from modifying the DOM directly,
-          // which would desync it from the document model.
-          e.preventDefault();
+          event.preventDefault();
           break;
       }
-    },
-    [dispatch],
-  );
+    };
+
+    el.addEventListener('beforeinput', handler);
+    return () => {
+      el.removeEventListener('beforeinput', handler);
+    };
+  }, [dispatch]);
 
   // -----------------------------------------------------------------------
   // Keyboard shortcuts
@@ -404,10 +420,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLDivElement>) => {
       const mod = e.metaKey || e.ctrlKey;
-
-      // -------------------------------------------------------------------
-      // Clipboard shortcuts
-      // -------------------------------------------------------------------
 
       if (mod && e.key === 'c') {
         e.preventDefault();
@@ -439,19 +451,11 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         return;
       }
 
-      // -------------------------------------------------------------------
-      // Select All
-      // -------------------------------------------------------------------
-
       if (mod && e.key === 'a') {
         e.preventDefault();
         handleSelectAll();
         return;
       }
-
-      // -------------------------------------------------------------------
-      // Basic formatting
-      // -------------------------------------------------------------------
 
       if (mod && e.key === 'b') {
         e.preventDefault();
@@ -471,14 +475,12 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         return;
       }
 
-      // Strikethrough: Ctrl+Shift+X
       if (mod && e.shiftKey && e.key === 'X') {
         e.preventDefault();
         dispatch({ type: 'toggle_strikethrough' });
         return;
       }
 
-      // Superscript / Subscript: Ctrl+= / Ctrl+Shift+=
       if (mod && e.key === '=') {
         e.preventDefault();
         if (e.shiftKey) {
@@ -488,10 +490,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         }
         return;
       }
-
-      // -------------------------------------------------------------------
-      // Alignment shortcuts
-      // -------------------------------------------------------------------
 
       if (mod && e.key === 'l') {
         e.preventDefault();
@@ -517,10 +515,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         return;
       }
 
-      // -------------------------------------------------------------------
-      // Font size shortcuts
-      // -------------------------------------------------------------------
-
       if (mod && e.key === ']') {
         e.preventDefault();
         dispatch({ type: 'grow_font' });
@@ -532,10 +526,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         dispatch({ type: 'shrink_font' });
         return;
       }
-
-      // -------------------------------------------------------------------
-      // Undo / Redo
-      // -------------------------------------------------------------------
 
       if (mod && e.key === 'z' && !e.shiftKey) {
         e.preventDefault();
@@ -549,10 +539,6 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         return;
       }
 
-      // -------------------------------------------------------------------
-      // Find / Replace
-      // -------------------------------------------------------------------
-
       if (mod && e.key === 'f') {
         e.preventDefault();
         onToggleFindReplace?.();
@@ -565,19 +551,11 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         return;
       }
 
-      // -------------------------------------------------------------------
-      // Save
-      // -------------------------------------------------------------------
-
       if (mod && e.key === 's') {
         e.preventDefault();
         onSave?.();
         return;
       }
-
-      // -------------------------------------------------------------------
-      // Page break (Ctrl+Enter)
-      // -------------------------------------------------------------------
 
       if (mod && e.key === 'Enter') {
         e.preventDefault();
@@ -585,19 +563,11 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         return;
       }
 
-      // -------------------------------------------------------------------
-      // Line break (Shift+Enter)
-      // -------------------------------------------------------------------
-
       if (!mod && e.shiftKey && e.key === 'Enter') {
         e.preventDefault();
         dispatch({ type: 'insert_line_break' });
         return;
       }
-
-      // -------------------------------------------------------------------
-      // Tab: indent / dedent in lists
-      // -------------------------------------------------------------------
 
       if (e.key === 'Tab') {
         e.preventDefault();
@@ -634,19 +604,14 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         {
           label: 'Copy',
           shortcut: 'Ctrl+C',
-          onClick: () => {
-            handleCopy();
-          },
+          onClick: () => { handleCopy(); },
         },
         {
           label: 'Paste',
           shortcut: 'Ctrl+V',
           onClick: () => {
-            navigator.clipboard
-              .readText()
-              .then(t => {
-                if (t) dispatch({ type: 'insert_text', payload: { text: t } });
-              })
+            navigator.clipboard.readText()
+              .then(t => { if (t) dispatch({ type: 'insert_text', payload: { text: t } }); })
               .catch(() => {});
           },
         },
@@ -654,9 +619,7 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         {
           label: 'Select All',
           shortcut: 'Ctrl+A',
-          onClick: () => {
-            handleSelectAll();
-          },
+          onClick: () => { handleSelectAll(); },
         },
       ];
 
@@ -667,63 +630,20 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
         const rowEl = target.closest('tr');
         const cellEl = target.closest('td');
         const rowIndex = rowEl
-          ? Array.from(rowEl.parentElement?.children ?? []).indexOf(rowEl)
-          : 0;
+          ? Array.from(rowEl.parentElement?.children ?? []).indexOf(rowEl) : 0;
         const colIndex =
           cellEl && rowEl ? Array.from(rowEl.children).indexOf(cellEl) : 0;
 
         items = [
           ...baseItems,
           { separator: true },
-          {
-            label: 'Insert Row Above',
-            onClick: () =>
-              dispatch({
-                type: 'insert_row',
-                payload: { table_id: tableId, after_row_index: rowIndex - 1 },
-              }),
-          },
-          {
-            label: 'Insert Row Below',
-            onClick: () =>
-              dispatch({
-                type: 'insert_row',
-                payload: { table_id: tableId, after_row_index: rowIndex },
-              }),
-          },
-          {
-            label: 'Insert Column Left',
-            onClick: () =>
-              dispatch({
-                type: 'insert_column',
-                payload: { table_id: tableId, after_col_index: colIndex - 1 },
-              }),
-          },
-          {
-            label: 'Insert Column Right',
-            onClick: () =>
-              dispatch({
-                type: 'insert_column',
-                payload: { table_id: tableId, after_col_index: colIndex },
-              }),
-          },
+          { label: 'Insert Row Above', onClick: () => dispatch({ type: 'insert_row', payload: { table_id: tableId, after_row_index: rowIndex - 1 } }) },
+          { label: 'Insert Row Below', onClick: () => dispatch({ type: 'insert_row', payload: { table_id: tableId, after_row_index: rowIndex } }) },
+          { label: 'Insert Column Left', onClick: () => dispatch({ type: 'insert_column', payload: { table_id: tableId, after_col_index: colIndex - 1 } }) },
+          { label: 'Insert Column Right', onClick: () => dispatch({ type: 'insert_column', payload: { table_id: tableId, after_col_index: colIndex } }) },
           { separator: true },
-          {
-            label: 'Delete Row',
-            onClick: () =>
-              dispatch({
-                type: 'delete_row',
-                payload: { table_id: tableId, row_index: rowIndex },
-              }),
-          },
-          {
-            label: 'Delete Column',
-            onClick: () =>
-              dispatch({
-                type: 'delete_column',
-                payload: { table_id: tableId, col_index: colIndex },
-              }),
-          },
+          { label: 'Delete Row', onClick: () => dispatch({ type: 'delete_row', payload: { table_id: tableId, row_index: rowIndex } }) },
+          { label: 'Delete Column', onClick: () => dispatch({ type: 'delete_column', payload: { table_id: tableId, col_index: colIndex } }) },
         ];
       }
 
@@ -732,101 +652,123 @@ const EditSurface: React.FC<EditSurfaceProps> = ({
     [dispatch, handleCopy, handleSelectAll],
   );
 
-  // Close context menu on any click within the editor surface
   const handleClick = useCallback(() => {
-    if (contextMenu) {
-      setContextMenu(null);
-    }
+    if (contextMenu) setContextMenu(null);
   }, [contextMenu]);
 
   // -----------------------------------------------------------------------
-  // Zoom & section properties styling
+  // Page dimensions from section properties (twips to px at 96dpi)
   // -----------------------------------------------------------------------
 
-  const surfaceStyle: React.CSSProperties = {};
-  if (zoom && zoom !== 100) {
-    surfaceStyle.transform = `scale(${zoom / 100})`;
-    surfaceStyle.transformOrigin = 'top center';
-  }
-  if (sectionProperties) {
-    if (sectionProperties.page_width) {
-      surfaceStyle.maxWidth = `${sectionProperties.page_width / 20}pt`; // twips to pt
-    }
-    if (
-      sectionProperties.margin_left != null ||
-      sectionProperties.margin_right != null
-    ) {
-      surfaceStyle.paddingLeft = `${(sectionProperties.margin_left ?? 1440) / 20}pt`;
-      surfaceStyle.paddingRight = `${(sectionProperties.margin_right ?? 1440) / 20}pt`;
-    }
+  const DPI = 96;
+  const twipToPx = (twips: number) => (twips / 1440) * DPI;
+
+  const pageWidthTwips = sectionProperties?.page_width ?? 12240;
+  const pageHeightTwips = sectionProperties?.page_height ?? 15840;
+  const marginTopTwips = sectionProperties?.margin_top ?? 1440;
+  const marginBottomTwips = sectionProperties?.margin_bottom ?? 1440;
+  const marginLeftTwips = sectionProperties?.margin_left ?? 1440;
+  const marginRightTwips = sectionProperties?.margin_right ?? 1440;
+
+  const pageWidthPx = twipToPx(pageWidthTwips);
+  const _pageHeightPx = twipToPx(pageHeightTwips);
+
+  // -----------------------------------------------------------------------
+  // Zoom wrapper
+  // -----------------------------------------------------------------------
+
+  const zoomWrapperStyle: React.CSSProperties = {};
+  if (zoom !== 100) {
+    zoomWrapperStyle.transform = `scale(${zoom / 100})`;
+    zoomWrapperStyle.transformOrigin = 'top center';
   }
 
   // -----------------------------------------------------------------------
-  // Render body
+  // Render body - split into pages
   // -----------------------------------------------------------------------
 
   const chunks = groupBodyChunks(doc.body);
+  const pages = splitIntoPages(chunks);
+
+  const renderChunk = (chunk: BodyChunk) => {
+    switch (chunk.kind) {
+      case 'paragraph': {
+        const para = (chunk.block as { paragraph: Paragraph }).paragraph;
+        return (
+          <div key={para.id} data-block-index={chunk.index}>
+            <ParagraphRenderer paragraph={para} images={images} />
+          </div>
+        );
+      }
+      case 'list': {
+        const key = `list-${chunk.paragraphs[0].id}`;
+        return (
+          <div key={key} data-block-index={chunk.startIndex}>
+            <ListRenderer
+              paragraphs={chunk.paragraphs}
+              listType={chunk.listType}
+              images={images}
+              startIndex={chunk.startIndex}
+            />
+          </div>
+        );
+      }
+      case 'table': {
+        const tbl = (chunk.block as { table: import('../../../types/document').Table }).table;
+        return (
+          <div key={tbl.id} data-block-index={chunk.index}>
+            <TableRenderer table={tbl} images={images} dispatch={dispatch} />
+          </div>
+        );
+      }
+      default:
+        return null;
+    }
+  };
 
   return (
     <>
-      <div
-        ref={editorRef}
-        className="edit-surface"
-        contentEditable={true}
-        suppressContentEditableWarning={true}
-        onBeforeInput={handleBeforeInput}
-        onKeyDown={handleKeyDown}
-        onContextMenu={handleContextMenu}
-        onClick={handleClick}
-        spellCheck={false}
-        role="textbox"
-        aria-multiline={true}
-        aria-label="Document editor"
-        style={Object.keys(surfaceStyle).length > 0 ? surfaceStyle : undefined}
-      >
-        {chunks.map((chunk) => {
-          switch (chunk.kind) {
-            case 'paragraph': {
-              const para = (chunk.block as { paragraph: Paragraph }).paragraph;
-              return (
-                <div key={para.id} data-block-index={chunk.index}>
-                  <ParagraphRenderer paragraph={para} images={images} />
-                </div>
-              );
-            }
-
-            case 'list': {
-              // Use a composite key from the first paragraph id + startIndex.
-              const key = `list-${chunk.paragraphs[0].id}`;
-              return (
-                <div key={key} data-block-index={chunk.startIndex}>
-                  <ListRenderer
-                    paragraphs={chunk.paragraphs}
-                    listType={chunk.listType}
-                    images={images}
-                    startIndex={chunk.startIndex}
-                  />
-                </div>
-              );
-            }
-
-            case 'table': {
-              const tbl = (chunk.block as { table: import('../../../types/document').Table }).table;
-              return (
-                <div key={tbl.id} data-block-index={chunk.index}>
-                  <TableRenderer
-                    table={tbl}
-                    images={images}
-                    dispatch={dispatch}
-                  />
-                </div>
-              );
-            }
-
-            default:
-              return null;
+      <div className="edit-surface-zoom-wrapper" style={zoomWrapperStyle}>
+        <div
+          ref={editorRef}
+          className="edit-surface"
+          contentEditable={true}
+          suppressContentEditableWarning={true}
+          onKeyDown={handleKeyDown}
+          onContextMenu={handleContextMenu}
+          onClick={handleClick}
+          spellCheck={false}
+          role="textbox"
+          aria-multiline={true}
+          aria-label="Document editor"
+          style={{
+            width: pageWidthPx,
+            maxWidth: pageWidthPx,
+            minHeight: _pageHeightPx,
+            paddingLeft: twipToPx(marginLeftTwips),
+            paddingRight: twipToPx(marginRightTwips),
+            paddingTop: twipToPx(marginTopTwips),
+            paddingBottom: twipToPx(marginBottomTwips),
+          }}
+        >
+          {pages.length <= 1
+            ? chunks.map(renderChunk)
+            : pages.map((page, pageIdx) => (
+                <React.Fragment key={`page-${pageIdx}`}>
+                  {pageIdx > 0 && (
+                    <div className="page-separator" contentEditable={false}>
+                      <div className="page-separator-shadow-bottom" />
+                      <div className="page-separator-gap">
+                        <span className="page-separator-label">Page {pageIdx + 1}</span>
+                      </div>
+                      <div className="page-separator-shadow-top" />
+                    </div>
+                  )}
+                  {page.chunks.map(renderChunk)}
+                </React.Fragment>
+              ))
           }
-        })}
+        </div>
       </div>
       {contextMenu && (
         <ContextMenu

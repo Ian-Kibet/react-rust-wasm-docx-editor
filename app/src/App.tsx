@@ -100,6 +100,8 @@ export const App: React.FC = () => {
         indentLeft={indentLeft}
         indentRight={indentRight}
         indentFirstLine={indentFirstLine}
+        sectionProperties={state.document.section_properties}
+        zoom={state.zoom}
       />
       <div className="editor-layout">
         <div className="editor-main">

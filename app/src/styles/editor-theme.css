@@ -164,6 +164,9 @@
   border-bottom: 1px solid var(--color-border);
   padding: 0;
   overflow: hidden;
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .ruler {

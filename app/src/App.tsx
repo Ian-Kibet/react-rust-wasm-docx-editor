@@ -95,16 +95,16 @@ export const App: React.FC = () => {
         selection={state.selection}
         document={state.document}
       />
-      <Ruler
-        dispatch={dispatch}
-        indentLeft={indentLeft}
-        indentRight={indentRight}
-        indentFirstLine={indentFirstLine}
-        sectionProperties={state.document.section_properties}
-        zoom={state.zoom}
-      />
       <div className="editor-layout">
         <div className="editor-main">
+          <Ruler
+            dispatch={dispatch}
+            indentLeft={indentLeft}
+            indentRight={indentRight}
+            indentFirstLine={indentFirstLine}
+            sectionProperties={state.document.section_properties}
+            zoom={state.zoom}
+          />
           <EditSurface
             document={state.document}
             selection={state.selection}

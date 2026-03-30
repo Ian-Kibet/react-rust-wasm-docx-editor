@@ -1,0 +1,340 @@
+use super::*;
+use docx_rs::{BorderType, Shading, TextBorder, VertAlignType, WidthType};
+use std::str::FromStr;
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+#[derive(Debug)]
+pub struct Style(docx_rs::Style);
+
+#[wasm_bindgen(js_name = createStyle)]
+pub fn create_style(style_id: &str, style_type: docx_rs::StyleType) -> Style {
+    Style(docx_rs::Style::new(style_id, style_type))
+}
+
+#[wasm_bindgen]
+impl Style {
+    pub fn name(mut self, name: &str) -> Self {
+        self.0.name = docx_rs::Name::new(name);
+        self
+    }
+
+    pub fn based_on(mut self, base: &str) -> Self {
+        self.0.based_on = Some(docx_rs::BasedOn::new(base));
+        self
+    }
+
+    pub fn size(mut self, size: usize) -> Self {
+        self.0.run_property = self.0.run_property.size(size);
+        self
+    }
+
+    pub fn color(mut self, color: &str) -> Self {
+        self.0.run_property = self.0.run_property.color(color);
+        self
+    }
+
+    pub fn highlight(mut self, color: &str) -> Self {
+        self.0.run_property = self.0.run_property.highlight(color);
+        self
+    }
+
+    pub fn bold(mut self) -> Self {
+        self.0.run_property = self.0.run_property.bold();
+        self
+    }
+
+    pub fn italic(mut self) -> Self {
+        self.0.run_property = self.0.run_property.italic();
+        self
+    }
+
+    pub fn strike(mut self) -> Self {
+        self.0.run_property = self.0.run_property.strike();
+        self
+    }
+
+    pub fn dstrike(mut self) -> Self {
+        self.0.run_property = self.0.run_property.dstrike();
+        self
+    }
+
+    pub fn underline(mut self, line_type: &str) -> Self {
+        self.0.run_property = self.0.run_property.underline(line_type);
+        self
+    }
+
+    pub fn shading(mut self, t: &str, color: &str, fill: &str) -> Self {
+        let mut s = Shading::new().color(color).fill(fill);
+        if let Ok(t) = docx_rs::ShdType::from_str(t) {
+            s = s.shd_type(t);
+        }
+        self.0.run_property = self.0.run_property.shading(s);
+        self
+    }
+
+    pub fn link(mut self, link: &str) -> Self {
+        self.0 = self.0.link(link);
+        self
+    }
+
+    pub fn vanish(mut self) -> Self {
+        self.0.run_property = self.0.run_property.vanish();
+        self
+    }
+
+    pub fn caps(mut self) -> Self {
+        self.0.run_property = self.0.run_property.caps();
+        self
+    }
+
+    pub fn fonts(mut self, f: RunFonts) -> Self {
+        self.0 = self.0.fonts(f.take());
+        self
+    }
+
+    pub fn character_spacing(mut self, spacing: i32) -> Self {
+        self.0.run_property = self.0.run_property.spacing(spacing);
+        self
+    }
+
+    pub fn vert_align(mut self, a: VertAlignType) -> Self {
+        self.0.run_property = self.0.run_property.vert_align(a);
+        self
+    }
+
+    pub fn text_border(
+        mut self,
+        border_type: BorderType,
+        size: usize,
+        space: usize,
+        color: &str,
+    ) -> Self {
+        let border = TextBorder::new()
+            .border_type(border_type)
+            .size(size)
+            .space(space)
+            .color(color);
+        self.0.run_property = self.0.run_property.text_border(border);
+        self
+    }
+
+    pub fn align(mut self, alignment_type: docx_rs::AlignmentType) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.align(alignment_type);
+        self
+    }
+
+    pub fn text_alignment(mut self, alignment_type: docx_rs::TextAlignmentType) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.text_alignment(alignment_type);
+        self
+    }
+
+    pub fn adjust_right_ind(mut self, v: isize) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.adjust_right_ind(v);
+        self
+    }
+
+    pub fn add_tab(
+        mut self,
+        val: Option<docx_rs::TabValueType>,
+        leader: Option<docx_rs::TabLeaderType>,
+        pos: Option<usize>,
+    ) -> Self {
+        self.0.paragraph_property =
+            self.0
+                .paragraph_property
+                .add_tab(docx_rs::Tab { val, leader, pos });
+        self
+    }
+
+    pub fn indent(
+        mut self,
+        left: i32,
+        special_indent_kind: Option<docx_rs::SpecialIndentKind>,
+        special_indent_size: Option<i32>,
+    ) -> Self {
+        let special_indent = create_special_indent(special_indent_kind, special_indent_size);
+        self.0.paragraph_property =
+            self.0
+                .paragraph_property
+                .indent(Some(left), special_indent, None, None);
+        self
+    }
+
+    pub fn outline_lvl(mut self, l: usize) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.outline_lvl(l);
+        self
+    }
+
+    // TODO: For now only numbering supported.
+    pub fn numbering(mut self, id: usize, level: usize) -> Self {
+        let id = docx_rs::NumberingId::new(id);
+        let level = docx_rs::IndentLevel::new(level);
+        self.0.paragraph_property = self.0.paragraph_property.numbering(id, level);
+        self
+    }
+
+    pub fn line_spacing(mut self, spacing: LineSpacing) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.line_spacing(spacing.take());
+        self
+    }
+
+    pub fn snap_to_grid(mut self, v: bool) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.snap_to_grid(v);
+        self
+    }
+
+    pub fn keep_next(mut self, v: bool) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.keep_next(v);
+        self
+    }
+
+    pub fn keep_lines(mut self, v: bool) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.keep_lines(v);
+        self
+    }
+
+    pub fn page_break_before(mut self, v: bool) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.page_break_before(v);
+        self
+    }
+
+    pub fn widow_control(mut self, v: bool) -> Self {
+        self.0.paragraph_property = self.0.paragraph_property.widow_control(v);
+        self
+    }
+
+    pub fn run_property(mut self, p: RunProperty) -> Self {
+        self.0.run_property = p.take();
+        self
+    }
+
+    pub fn paragraph_property(mut self, p: ParagraphProperty) -> Self {
+        self.0.paragraph_property = p.take();
+        self
+    }
+
+    pub fn table_property(mut self, p: docx_rs::TableProperty) -> Self {
+        self.0.table_property = p;
+        self
+    }
+
+    pub fn table_cell_property(mut self, p: docx_rs::TableCellProperty) -> Self {
+        self.0.table_cell_property = p;
+        self
+    }
+
+    pub fn table_indent(mut self, v: i32) -> Self {
+        self.0.table_property = self.0.table_property.indent(v);
+        self
+    }
+
+    pub fn table_align(mut self, v: docx_rs::TableAlignmentType) -> Self {
+        self.0.table_property = self.0.table_property.align(v);
+        self
+    }
+
+    pub fn set_cell_margins(
+        mut self,
+        top: usize,
+        right: usize,
+        bottom: usize,
+        left: usize,
+    ) -> Self {
+        let m = docx_rs::TableCellMargins::new().margin(top, right, bottom, left);
+        self.0.table_property = self.0.table_property.set_margins(m);
+        self
+    }
+
+    pub fn cell_margin_top(mut self, v: usize, t: WidthType) -> Self {
+        self.0.table_property = self.0.table_property.cell_margin_top(v, t);
+        self
+    }
+
+    pub fn cell_margin_right(mut self, v: usize, t: WidthType) -> Self {
+        self.0.table_property = self.0.table_property.cell_margin_right(v, t);
+        self
+    }
+
+    pub fn cell_margin_bottom(mut self, v: usize, t: WidthType) -> Self {
+        self.0.table_property = self.0.table_property.cell_margin_bottom(v, t);
+        self
+    }
+
+    pub fn cell_margin_left(mut self, v: usize, t: WidthType) -> Self {
+        self.0.table_property = self.0.table_property.cell_margin_left(v, t);
+        self
+    }
+
+    pub fn layout(mut self, t: docx_rs::TableLayoutType) -> Self {
+        self.0.table_property = self.0.table_property.layout(t);
+        self
+    }
+
+    // frame property
+    pub fn wrap(mut self, wrap: &str) -> Self {
+        self.0 = self.0.wrap(wrap);
+        self
+    }
+
+    pub fn v_anchor(mut self, anchor: &str) -> Self {
+        self.0 = self.0.v_anchor(anchor);
+        self
+    }
+
+    pub fn h_anchor(mut self, anchor: &str) -> Self {
+        self.0 = self.0.h_anchor(anchor);
+        self
+    }
+
+    pub fn h_rule(mut self, r: &str) -> Self {
+        self.0 = self.0.h_rule(r);
+        self
+    }
+
+    pub fn x_align(mut self, align: &str) -> Self {
+        self.0 = self.0.x_align(align);
+        self
+    }
+
+    pub fn y_align(mut self, align: &str) -> Self {
+        self.0 = self.0.y_align(align);
+        self
+    }
+
+    pub fn h_space(mut self, x: i32) -> Self {
+        self.0 = self.0.h_space(x);
+        self
+    }
+
+    pub fn v_space(mut self, x: i32) -> Self {
+        self.0 = self.0.v_space(x);
+        self
+    }
+
+    pub fn frame_x(mut self, x: i32) -> Self {
+        self.0 = self.0.frame_x(x);
+        self
+    }
+
+    pub fn frame_y(mut self, y: i32) -> Self {
+        self.0 = self.0.frame_y(y);
+        self
+    }
+
+    pub fn frame_width(mut self, n: u32) -> Self {
+        self.0 = self.0.frame_width(n);
+        self
+    }
+
+    pub fn frame_height(mut self, n: u32) -> Self {
+        self.0 = self.0.frame_height(n);
+        self
+    }
+}
+
+impl Style {
+    pub fn take(self) -> docx_rs::Style {
+        self.0
+    }
+}

@@ -1,5 +1,4 @@
 import { useReducer } from 'react';
-import { v4 as uuidv4 } from 'uuid';
 import {
   DocxDocument,
   BlockElement,
@@ -13,8 +12,20 @@ import {
   TableCell,
   TableCellProperties,
   TableProperties,
+  Comment,
+  Footnote,
+  Endnote,
+  SectionProperties,
 } from '../types/document';
-import { EditorSelection } from '../types/editor';
+import { EditorSelection, EditingZone } from '../types/editor';
+import {
+  normalizeSelection,
+  getRunsInRange,
+  applyRunPropertyToRange,
+  deleteRange,
+  getSelectedText,
+  splitRunAtOffset,
+} from '../utils/rangeOps';
 
 // ---------------------------------------------------------------------------
 // State
@@ -26,6 +37,9 @@ export interface DocumentState {
   undo_stack: DocxDocument[];
   redo_stack: DocxDocument[];
   is_dirty: boolean;
+  editing_zone: EditingZone;
+  find_replace_open: boolean;
+  zoom: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,18 +55,54 @@ export type DocumentAction =
   | { type: 'toggle_bold' }
   | { type: 'toggle_italic' }
   | { type: 'toggle_underline' }
+  | { type: 'toggle_strikethrough' }
+  | { type: 'toggle_superscript' }
+  | { type: 'toggle_subscript' }
+  | { type: 'toggle_all_caps' }
+  | { type: 'toggle_small_caps' }
   | { type: 'set_font_size'; payload: { size: number } }
   | { type: 'set_font_family'; payload: { family: string } }
   | { type: 'set_color'; payload: { color: string } }
+  | { type: 'set_highlight'; payload: { color: string | null } }
   | { type: 'set_alignment'; payload: { alignment: Alignment } }
   | { type: 'set_heading_level'; payload: { level: number | null } }
+  | { type: 'set_line_spacing'; payload: { spacing: number; rule?: string } }
   | { type: 'toggle_bullet_list' }
   | { type: 'toggle_numbered_list' }
   | { type: 'insert_table'; payload: { rows: number; cols: number } }
   | { type: 'insert_image'; payload: ImageData }
   | { type: 'set_paragraph_indent'; payload: { indent_left?: number; indent_right?: number; indent_first_line?: number } }
+  | { type: 'insert_hyperlink'; payload: { url: string; text?: string; tooltip?: string } }
+  | { type: 'insert_page_break' }
+  | { type: 'insert_line_break' }
+  | { type: 'grow_font' }
+  | { type: 'shrink_font' }
+  | { type: 'increase_indent' }
+  | { type: 'decrease_indent' }
+  | { type: 'delete_range' }
+  | { type: 'insert_row'; payload: { table_id: string; after_row_index: number } }
+  | { type: 'insert_column'; payload: { table_id: string; after_col_index: number } }
+  | { type: 'delete_row'; payload: { table_id: string; row_index: number } }
+  | { type: 'delete_column'; payload: { table_id: string; col_index: number } }
+  | { type: 'set_cell_shading'; payload: { cell_id: string; color: string } }
+  | { type: 'resize_image'; payload: { image_id: string; width: number; height: number } }
+  | { type: 'add_comment'; payload: { author: string; content: string } }
+  | { type: 'delete_comment'; payload: { comment_id: string } }
+  | { type: 'insert_footnote'; payload: { content: string } }
+  | { type: 'insert_endnote'; payload: { content: string } }
+  | { type: 'set_section_properties'; payload: Partial<SectionProperties> }
+  | { type: 'set_editing_zone'; payload: EditingZone }
+  | { type: 'toggle_find_replace' }
+  | { type: 'set_zoom'; payload: { zoom: number } }
+  | { type: 'paste_runs'; payload: { runs: Run[] } }
   | { type: 'undo' }
   | { type: 'redo' };
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const FONT_SIZE_SEQUENCE = [8, 9, 10, 11, 12, 14, 16, 18, 20, 22, 24, 26, 28, 36, 48, 72];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -63,16 +113,21 @@ function cloneDocument(doc: DocxDocument): DocxDocument {
 }
 
 function pushUndo(state: DocumentState): DocumentState {
+  const stack = [...state.undo_stack, cloneDocument(state.document)];
+  // Cap undo stack at 50 entries
+  if (stack.length > 50) {
+    stack.splice(0, stack.length - 50);
+  }
   return {
     ...state,
-    undo_stack: [...state.undo_stack, cloneDocument(state.document)],
+    undo_stack: stack,
     redo_stack: [],
   };
 }
 
 function createEmptyRun(): Run {
   return {
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     text: '',
     properties: {},
   };
@@ -80,7 +135,7 @@ function createEmptyRun(): Run {
 
 function createEmptyParagraph(): Paragraph {
   return {
-    id: uuidv4(),
+    id: crypto.randomUUID(),
     runs: [createEmptyRun()],
     properties: {},
   };
@@ -129,6 +184,15 @@ function findParagraphAndRun(
   return null;
 }
 
+function findTableById(doc: DocxDocument, tableId: string): Table | null {
+  for (const block of doc.body) {
+    if ('table' in block && block.table.id === tableId) {
+      return block.table;
+    }
+  }
+  return null;
+}
+
 export function createDefaultDocument(): DocxDocument {
   return {
     body: [{ paragraph: createEmptyParagraph() }],
@@ -137,6 +201,9 @@ export function createDefaultDocument(): DocxDocument {
     headers: [],
     footers: [],
     images: [],
+    comments: [],
+    footnotes: [],
+    endnotes: [],
   };
 }
 
@@ -157,6 +224,9 @@ function documentReducer(
         undo_stack: [],
         redo_stack: [],
         is_dirty: false,
+        editing_zone: 'body',
+        find_replace_open: false,
+        zoom: 100,
       };
     }
 
@@ -170,18 +240,28 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
+
+      let workingSelection = state.selection;
+
+      // If there's a range selection, delete it first
+      if (!state.selection.is_collapsed) {
+        const deleteResult = deleteRange(doc, state.selection);
+        if (!deleteResult) return state;
+        workingSelection = deleteResult;
+      }
+
+      const loc = findParagraphAndRun(doc, workingSelection);
       if (!loc) return state;
 
       const { run } = loc;
-      const offset = state.selection.anchor.offset;
+      const offset = workingSelection.anchor.offset;
       run.text =
         run.text.slice(0, offset) + action.payload.text + run.text.slice(offset);
 
       const newOffset = offset + action.payload.text.length;
       const newSelection: EditorSelection = {
-        anchor: { ...state.selection.anchor, offset: newOffset },
-        focus: { ...state.selection.anchor, offset: newOffset },
+        anchor: { ...workingSelection.anchor, offset: newOffset },
+        focus: { ...workingSelection.anchor, offset: newOffset },
         is_collapsed: true,
       };
 
@@ -198,6 +278,20 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
+
+      // Range selection: delete the range and return
+      if (!state.selection.is_collapsed) {
+        const resultSelection = deleteRange(doc, state.selection);
+        if (!resultSelection) return state;
+        return {
+          ...newState,
+          document: doc,
+          selection: resultSelection,
+          is_dirty: true,
+        };
+      }
+
+      // Collapsed selection: single-char delete
       const loc = findParagraphAndRun(doc, state.selection);
       if (!loc) return state;
 
@@ -208,7 +302,7 @@ function documentReducer(
         if (offset > 0) {
           // Delete one character before offset
           run.text = run.text.slice(0, offset - 1) + run.text.slice(offset);
-          const newSelection: EditorSelection = {
+          const sel: EditorSelection = {
             anchor: { ...state.selection.anchor, offset: offset - 1 },
             focus: { ...state.selection.anchor, offset: offset - 1 },
             is_collapsed: true,
@@ -216,7 +310,7 @@ function documentReducer(
           return {
             ...newState,
             document: doc,
-            selection: newSelection,
+            selection: sel,
             is_dirty: true,
           };
         } else if (runIndex > 0) {
@@ -225,7 +319,7 @@ function documentReducer(
           const prevLength = prevRun.text.length;
           prevRun.text = prevRun.text + run.text;
           paragraph.runs.splice(runIndex, 1);
-          const newSelection: EditorSelection = {
+          const sel: EditorSelection = {
             anchor: {
               ...state.selection.anchor,
               run_index: runIndex - 1,
@@ -241,7 +335,7 @@ function documentReducer(
           return {
             ...newState,
             document: doc,
-            selection: newSelection,
+            selection: sel,
             is_dirty: true,
           };
         } else if (blockIndex > 0) {
@@ -257,7 +351,7 @@ function documentReducer(
           prevParagraph.runs.push(...paragraph.runs);
           doc.body.splice(blockIndex, 1);
 
-          const newSelection: EditorSelection = {
+          const sel: EditorSelection = {
             anchor: {
               block_index: blockIndex - 1,
               paragraph_id: prevParagraph.id,
@@ -275,7 +369,7 @@ function documentReducer(
           return {
             ...newState,
             document: doc,
-            selection: newSelection,
+            selection: sel,
             is_dirty: true,
           };
         }
@@ -325,11 +419,21 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
+
+      let workingSelection = state.selection;
+
+      // If there's a range selection, delete it first
+      if (!state.selection.is_collapsed) {
+        const deleteResult = deleteRange(doc, state.selection);
+        if (!deleteResult) return state;
+        workingSelection = deleteResult;
+      }
+
+      const loc = findParagraphAndRun(doc, workingSelection);
       if (!loc) return state;
 
       const { blockIndex, paragraph, runIndex, run } = loc;
-      const offset = state.selection.anchor.offset;
+      const offset = workingSelection.anchor.offset;
 
       // Split the current run at offset into two runs
       const beforeText = run.text.slice(0, offset);
@@ -338,7 +442,7 @@ function documentReducer(
       run.text = beforeText;
 
       const newFirstRun: Run = {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         text: afterText,
         properties: { ...run.properties },
       };
@@ -351,7 +455,7 @@ function documentReducer(
       paragraph.runs = runsForCurrent;
 
       const newParagraph: Paragraph = {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         runs: runsForNew.length > 0 ? runsForNew : [createEmptyRun()],
         properties: { ...paragraph.properties },
       };
@@ -387,10 +491,16 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
-      if (!loc) return state;
 
-      loc.run.properties.bold = !loc.run.properties.bold;
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.bold = !loc.run.properties.bold;
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allBold = segments.every(s => s.run.properties.bold);
+        applyRunPropertyToRange(doc, state.selection, 'bold', !allBold);
+      }
 
       return { ...newState, document: doc, is_dirty: true };
     }
@@ -400,10 +510,16 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
-      if (!loc) return state;
 
-      loc.run.properties.italic = !loc.run.properties.italic;
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.italic = !loc.run.properties.italic;
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allItalic = segments.every(s => s.run.properties.italic);
+        applyRunPropertyToRange(doc, state.selection, 'italic', !allItalic);
+      }
 
       return { ...newState, document: doc, is_dirty: true };
     }
@@ -413,10 +529,137 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
-      if (!loc) return state;
 
-      loc.run.properties.underline = !loc.run.properties.underline;
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.underline = !loc.run.properties.underline;
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allUnderline = segments.every(s => s.run.properties.underline);
+        applyRunPropertyToRange(doc, state.selection, 'underline', !allUnderline);
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- toggle_strikethrough -----
+    case 'toggle_strikethrough': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.strikethrough = !loc.run.properties.strikethrough;
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allStrike = segments.every(s => s.run.properties.strikethrough);
+        applyRunPropertyToRange(doc, state.selection, 'strikethrough', !allStrike);
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- toggle_superscript -----
+    case 'toggle_superscript': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.superscript = !loc.run.properties.superscript;
+        // Superscript and subscript are mutually exclusive
+        if (loc.run.properties.superscript) {
+          loc.run.properties.subscript = false;
+        }
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allSuper = segments.every(s => s.run.properties.superscript);
+        applyRunPropertyToRange(doc, state.selection, 'superscript', !allSuper);
+        if (!allSuper) {
+          applyRunPropertyToRange(doc, state.selection, 'subscript', false);
+        }
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- toggle_subscript -----
+    case 'toggle_subscript': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.subscript = !loc.run.properties.subscript;
+        // Superscript and subscript are mutually exclusive
+        if (loc.run.properties.subscript) {
+          loc.run.properties.superscript = false;
+        }
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allSub = segments.every(s => s.run.properties.subscript);
+        applyRunPropertyToRange(doc, state.selection, 'subscript', !allSub);
+        if (!allSub) {
+          applyRunPropertyToRange(doc, state.selection, 'superscript', false);
+        }
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- toggle_all_caps -----
+    case 'toggle_all_caps': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.all_caps = !loc.run.properties.all_caps;
+        if (loc.run.properties.all_caps) {
+          loc.run.properties.small_caps = false;
+        }
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allCaps = segments.every(s => s.run.properties.all_caps);
+        applyRunPropertyToRange(doc, state.selection, 'all_caps', !allCaps);
+        if (!allCaps) {
+          applyRunPropertyToRange(doc, state.selection, 'small_caps', false);
+        }
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- toggle_small_caps -----
+    case 'toggle_small_caps': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        loc.run.properties.small_caps = !loc.run.properties.small_caps;
+        if (loc.run.properties.small_caps) {
+          loc.run.properties.all_caps = false;
+        }
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        const allSmallCaps = segments.every(s => s.run.properties.small_caps);
+        applyRunPropertyToRange(doc, state.selection, 'small_caps', !allSmallCaps);
+        if (!allSmallCaps) {
+          applyRunPropertyToRange(doc, state.selection, 'all_caps', false);
+        }
+      }
 
       return { ...newState, document: doc, is_dirty: true };
     }
@@ -426,10 +669,8 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
-      if (!loc) return state;
 
-      loc.run.properties.font_size = action.payload.size;
+      applyRunPropertyToRange(doc, state.selection, 'font_size', action.payload.size);
 
       return { ...newState, document: doc, is_dirty: true };
     }
@@ -439,10 +680,8 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
-      if (!loc) return state;
 
-      loc.run.properties.font_family = action.payload.family;
+      applyRunPropertyToRange(doc, state.selection, 'font_family', action.payload.family);
 
       return { ...newState, document: doc, is_dirty: true };
     }
@@ -452,10 +691,23 @@ function documentReducer(
       if (!state.selection) return state;
       const newState = pushUndo(state);
       const doc = cloneDocument(newState.document);
-      const loc = findParagraphAndRun(doc, state.selection);
-      if (!loc) return state;
 
-      loc.run.properties.color = action.payload.color;
+      applyRunPropertyToRange(doc, state.selection, 'color', action.payload.color);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- set_highlight -----
+    case 'set_highlight': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (action.payload.color === null) {
+        applyRunPropertyToRange(doc, state.selection, 'highlight', undefined);
+      } else {
+        applyRunPropertyToRange(doc, state.selection, 'highlight', action.payload.color);
+      }
 
       return { ...newState, document: doc, is_dirty: true };
     }
@@ -485,6 +737,22 @@ function documentReducer(
         delete loc.paragraph.properties.heading_level;
       } else {
         loc.paragraph.properties.heading_level = action.payload.level;
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- set_line_spacing -----
+    case 'set_line_spacing': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      loc.paragraph.properties.line_spacing = action.payload.spacing;
+      if (action.payload.rule) {
+        loc.paragraph.properties.line_spacing_rule = action.payload.rule as 'auto' | 'exact' | 'at_least';
       }
 
       return { ...newState, document: doc, is_dirty: true };
@@ -540,19 +808,19 @@ function documentReducer(
         const cells: TableCell[] = [];
         for (let c = 0; c < cols; c++) {
           cells.push({
-            id: uuidv4(),
+            id: crypto.randomUUID(),
             content: [{ paragraph: createEmptyParagraph() }],
             properties: {} as TableCellProperties,
           });
         }
         tableRows.push({
-          id: uuidv4(),
+          id: crypto.randomUUID(),
           cells,
         });
       }
 
       const table: Table = {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         rows: tableRows,
         properties: {} as TableProperties,
       };
@@ -576,7 +844,7 @@ function documentReducer(
 
       // Create a new run with the inline image reference
       const imageRun: Run = {
-        id: uuidv4(),
+        id: crypto.randomUUID(),
         text: '',
         properties: {
           inline_image: action.payload.id,
@@ -601,6 +869,519 @@ function documentReducer(
       if (indent_left !== undefined) loc.paragraph.properties.indent_left = indent_left;
       if (indent_right !== undefined) loc.paragraph.properties.indent_right = indent_right;
       if (indent_first_line !== undefined) loc.paragraph.properties.indent_first_line = indent_first_line;
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- insert_hyperlink -----
+    case 'insert_hyperlink': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      const displayText = action.payload.text || action.payload.url;
+      const hyperlinkRun: Run = {
+        id: crypto.randomUUID(),
+        text: displayText,
+        properties: {
+          hyperlink_url: action.payload.url,
+          hyperlink_tooltip: action.payload.tooltip,
+          color: '#0563C1',
+          underline: true,
+        },
+      };
+
+      // Insert the hyperlink run after the current run
+      loc.paragraph.runs.splice(loc.runIndex + 1, 0, hyperlinkRun);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- insert_page_break -----
+    case 'insert_page_break': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      const pageBreakRun: Run = {
+        id: crypto.randomUUID(),
+        text: '',
+        properties: {
+          page_break: true,
+        },
+      };
+
+      loc.paragraph.runs.splice(loc.runIndex + 1, 0, pageBreakRun);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- insert_line_break -----
+    case 'insert_line_break': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      const lineBreakRun: Run = {
+        id: crypto.randomUUID(),
+        text: '',
+        properties: {
+          line_break: true,
+        },
+      };
+
+      loc.paragraph.runs.splice(loc.runIndex + 1, 0, lineBreakRun);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- grow_font -----
+    case 'grow_font': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        const currentSize = loc.run.properties.font_size || 11;
+        const nextSize = FONT_SIZE_SEQUENCE.find(s => s > currentSize);
+        loc.run.properties.font_size = nextSize !== undefined ? nextSize : currentSize;
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        for (const seg of segments) {
+          const currentSize = seg.run.properties.font_size || 11;
+          const nextSize = FONT_SIZE_SEQUENCE.find(s => s > currentSize);
+          seg.run.properties.font_size = nextSize !== undefined ? nextSize : currentSize;
+        }
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- shrink_font -----
+    case 'shrink_font': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (state.selection.is_collapsed) {
+        const loc = findParagraphAndRun(doc, state.selection);
+        if (!loc) return state;
+        const currentSize = loc.run.properties.font_size || 11;
+        let prevSize = currentSize;
+        for (let i = FONT_SIZE_SEQUENCE.length - 1; i >= 0; i--) {
+          if (FONT_SIZE_SEQUENCE[i] < currentSize) {
+            prevSize = FONT_SIZE_SEQUENCE[i];
+            break;
+          }
+        }
+        loc.run.properties.font_size = prevSize;
+      } else {
+        const segments = getRunsInRange(doc, state.selection);
+        for (const seg of segments) {
+          const currentSize = seg.run.properties.font_size || 11;
+          let prevSize = currentSize;
+          for (let i = FONT_SIZE_SEQUENCE.length - 1; i >= 0; i--) {
+            if (FONT_SIZE_SEQUENCE[i] < currentSize) {
+              prevSize = FONT_SIZE_SEQUENCE[i];
+              break;
+            }
+          }
+          seg.run.properties.font_size = prevSize;
+        }
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- increase_indent -----
+    case 'increase_indent': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      const currentIndent = loc.paragraph.properties.indent_left || 0;
+      loc.paragraph.properties.indent_left = currentIndent + 36;
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- decrease_indent -----
+    case 'decrease_indent': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      const currentIndent = loc.paragraph.properties.indent_left || 0;
+      loc.paragraph.properties.indent_left = Math.max(0, currentIndent - 36);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- delete_range -----
+    case 'delete_range': {
+      if (!state.selection || state.selection.is_collapsed) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      const resultSelection = deleteRange(doc, state.selection);
+      if (!resultSelection) return state;
+
+      return {
+        ...newState,
+        document: doc,
+        selection: resultSelection,
+        is_dirty: true,
+      };
+    }
+
+    // ----- insert_row -----
+    case 'insert_row': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const table = findTableById(doc, action.payload.table_id);
+      if (!table) return state;
+
+      const { after_row_index } = action.payload;
+      const sourceRow = table.rows[after_row_index];
+      if (!sourceRow) return state;
+
+      const newCells: TableCell[] = sourceRow.cells.map(cell => ({
+        id: crypto.randomUUID(),
+        content: [{ paragraph: createEmptyParagraph() }],
+        properties: { ...cell.properties },
+      }));
+
+      const newRow: TableRow = {
+        id: crypto.randomUUID(),
+        cells: newCells,
+        properties: sourceRow.properties ? { ...sourceRow.properties } : undefined,
+      };
+
+      table.rows.splice(after_row_index + 1, 0, newRow);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- insert_column -----
+    case 'insert_column': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const table = findTableById(doc, action.payload.table_id);
+      if (!table) return state;
+
+      const { after_col_index } = action.payload;
+
+      for (const row of table.rows) {
+        const newCell: TableCell = {
+          id: crypto.randomUUID(),
+          content: [{ paragraph: createEmptyParagraph() }],
+          properties: {} as TableCellProperties,
+        };
+        row.cells.splice(after_col_index + 1, 0, newCell);
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- delete_row -----
+    case 'delete_row': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const table = findTableById(doc, action.payload.table_id);
+      if (!table) return state;
+
+      const { row_index } = action.payload;
+      if (row_index < 0 || row_index >= table.rows.length) return state;
+
+      table.rows.splice(row_index, 1);
+
+      // If table becomes empty, remove the table block from doc.body
+      if (table.rows.length === 0) {
+        const tableBlockIndex = doc.body.findIndex(
+          block => 'table' in block && block.table.id === action.payload.table_id,
+        );
+        if (tableBlockIndex !== -1) {
+          doc.body.splice(tableBlockIndex, 1);
+        }
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- delete_column -----
+    case 'delete_column': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const table = findTableById(doc, action.payload.table_id);
+      if (!table) return state;
+
+      const { col_index } = action.payload;
+
+      for (const row of table.rows) {
+        if (col_index >= 0 && col_index < row.cells.length) {
+          row.cells.splice(col_index, 1);
+        }
+      }
+
+      // If all rows end up with 0 cells, remove the table
+      const allEmpty = table.rows.every(row => row.cells.length === 0);
+      if (allEmpty) {
+        const tableBlockIndex = doc.body.findIndex(
+          block => 'table' in block && block.table.id === action.payload.table_id,
+        );
+        if (tableBlockIndex !== -1) {
+          doc.body.splice(tableBlockIndex, 1);
+        }
+      }
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- set_cell_shading -----
+    case 'set_cell_shading': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      let found = false;
+      for (const block of doc.body) {
+        if ('table' in block) {
+          for (const row of block.table.rows) {
+            for (const cell of row.cells) {
+              if (cell.id === action.payload.cell_id) {
+                cell.properties.shading = action.payload.color;
+                found = true;
+                break;
+              }
+            }
+            if (found) break;
+          }
+        }
+        if (found) break;
+      }
+
+      if (!found) return state;
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- resize_image -----
+    case 'resize_image': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      const image = doc.images.find(img => img.id === action.payload.image_id);
+      if (!image) return state;
+
+      image.width = action.payload.width;
+      image.height = action.payload.height;
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- add_comment -----
+    case 'add_comment': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (!doc.comments) {
+        doc.comments = [];
+      }
+
+      const commentParagraph = createEmptyParagraph();
+      commentParagraph.runs[0].text = action.payload.content;
+
+      const comment: Comment = {
+        id: crypto.randomUUID(),
+        author: action.payload.author,
+        date: new Date().toISOString(),
+        content: [{ paragraph: commentParagraph }],
+      };
+
+      doc.comments.push(comment);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- delete_comment -----
+    case 'delete_comment': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      if (!doc.comments) return state;
+
+      doc.comments = doc.comments.filter(c => c.id !== action.payload.comment_id);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- insert_footnote -----
+    case 'insert_footnote': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      if (!doc.footnotes) {
+        doc.footnotes = [];
+      }
+
+      const footnoteParagraph = createEmptyParagraph();
+      footnoteParagraph.runs[0].text = action.payload.content;
+
+      const footnote: Footnote = {
+        id: crypto.randomUUID(),
+        content: [{ paragraph: footnoteParagraph }],
+      };
+
+      doc.footnotes.push(footnote);
+
+      // Insert a run with footnote_ref at the cursor position
+      const footnoteRefRun: Run = {
+        id: crypto.randomUUID(),
+        text: '',
+        properties: {
+          footnote_ref: footnote.id,
+          superscript: true,
+        },
+      };
+
+      loc.paragraph.runs.splice(loc.runIndex + 1, 0, footnoteRefRun);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- insert_endnote -----
+    case 'insert_endnote': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+      const loc = findParagraphAndRun(doc, state.selection);
+      if (!loc) return state;
+
+      if (!doc.endnotes) {
+        doc.endnotes = [];
+      }
+
+      const endnoteParagraph = createEmptyParagraph();
+      endnoteParagraph.runs[0].text = action.payload.content;
+
+      const endnote: Endnote = {
+        id: crypto.randomUUID(),
+        content: [{ paragraph: endnoteParagraph }],
+      };
+
+      doc.endnotes.push(endnote);
+
+      // Insert a run with endnote_ref at the cursor position
+      const endnoteRefRun: Run = {
+        id: crypto.randomUUID(),
+        text: '',
+        properties: {
+          endnote_ref: endnote.id,
+          superscript: true,
+        },
+      };
+
+      loc.paragraph.runs.splice(loc.runIndex + 1, 0, endnoteRefRun);
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- set_section_properties -----
+    case 'set_section_properties': {
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      doc.section_properties = {
+        ...(doc.section_properties || {}),
+        ...action.payload,
+      };
+
+      return { ...newState, document: doc, is_dirty: true };
+    }
+
+    // ----- set_editing_zone -----
+    case 'set_editing_zone': {
+      return { ...state, editing_zone: action.payload };
+    }
+
+    // ----- toggle_find_replace -----
+    case 'toggle_find_replace': {
+      return { ...state, find_replace_open: !state.find_replace_open };
+    }
+
+    // ----- set_zoom -----
+    case 'set_zoom': {
+      const clamped = Math.max(25, Math.min(400, action.payload.zoom));
+      return { ...state, zoom: clamped };
+    }
+
+    // ----- paste_runs -----
+    case 'paste_runs': {
+      if (!state.selection) return state;
+      const newState = pushUndo(state);
+      const doc = cloneDocument(newState.document);
+
+      let workingSelection = state.selection;
+
+      // If selection is not collapsed, delete the range first
+      if (!state.selection.is_collapsed) {
+        const deleteResult = deleteRange(doc, state.selection);
+        if (!deleteResult) return state;
+        workingSelection = deleteResult;
+      }
+
+      const loc = findParagraphAndRun(doc, workingSelection);
+      if (!loc) return state;
+
+      // Clone the pasted runs with new IDs
+      const runsToInsert: Run[] = action.payload.runs.map(r => ({
+        id: crypto.randomUUID(),
+        text: r.text,
+        properties: { ...r.properties },
+      }));
+
+      // Splice the pasted runs into the current paragraph after the current run
+      loc.paragraph.runs.splice(loc.runIndex + 1, 0, ...runsToInsert);
+
+      // Place cursor at the end of the last pasted run
+      if (runsToInsert.length > 0) {
+        const lastPastedRun = runsToInsert[runsToInsert.length - 1];
+        const newRunIndex = loc.runIndex + runsToInsert.length;
+        const newOffset = lastPastedRun.text.length;
+        const sel: EditorSelection = {
+          anchor: {
+            ...workingSelection.anchor,
+            run_index: newRunIndex,
+            offset: newOffset,
+          },
+          focus: {
+            ...workingSelection.anchor,
+            run_index: newRunIndex,
+            offset: newOffset,
+          },
+          is_collapsed: true,
+        };
+        return {
+          ...newState,
+          document: doc,
+          selection: sel,
+          is_dirty: true,
+        };
+      }
 
       return { ...newState, document: doc, is_dirty: true };
     }
@@ -646,6 +1427,9 @@ const initialState: DocumentState = {
   undo_stack: [],
   redo_stack: [],
   is_dirty: false,
+  editing_zone: 'body',
+  find_replace_open: false,
+  zoom: 100,
 };
 
 export function useDocumentModel() {

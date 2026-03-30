@@ -10,6 +10,9 @@ interface HomeRibbonProps {
   dispatch: React.Dispatch<DocumentAction>;
   selection: EditorSelection | null;
   document: DocxDocument;
+  onCut?: () => void;
+  onCopy?: () => void;
+  onPaste?: () => void;
 }
 
 function getSelectedParagraphAndRun(
@@ -32,6 +35,9 @@ const FONT_OPTIONS = [
   { value: 'Georgia', label: 'Georgia' },
   { value: 'Verdana', label: 'Verdana' },
   { value: 'Helvetica', label: 'Helvetica' },
+  { value: 'Calibri', label: 'Calibri' },
+  { value: 'Cambria', label: 'Cambria' },
+  { value: 'Tahoma', label: 'Tahoma' },
 ];
 
 const HEADING_OPTIONS = [
@@ -44,9 +50,23 @@ const HEADING_OPTIONS = [
   { value: '6', label: 'Heading 6' },
 ];
 
-const noop = () => {};
+const LINE_SPACING_OPTIONS = [
+  { value: '240', label: '1.0' },
+  { value: '276', label: '1.15' },
+  { value: '360', label: '1.5' },
+  { value: '480', label: '2.0' },
+  { value: '600', label: '2.5' },
+  { value: '720', label: '3.0' },
+];
 
-export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, document: doc }) => {
+export const HomeRibbon: React.FC<HomeRibbonProps> = ({
+  dispatch,
+  selection,
+  document: doc,
+  onCut,
+  onCopy,
+  onPaste,
+}) => {
   const { paragraph, run } = useMemo(
     () => getSelectedParagraphAndRun(doc, selection),
     [doc, selection],
@@ -74,6 +94,12 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
     [dispatch],
   );
 
+  const handleHighlight = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) =>
+      dispatch({ type: 'set_highlight', payload: { color: e.target.value } }),
+    [dispatch],
+  );
+
   const handleHeading = useCallback(
     (v: string) => {
       const level = parseInt(v, 10);
@@ -82,24 +108,32 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
     [dispatch],
   );
 
+  const handleLineSpacing = useCallback(
+    (v: string) => {
+      const spacing = parseInt(v, 10);
+      dispatch({ type: 'set_line_spacing', payload: { spacing, rule: 'auto' } });
+    },
+    [dispatch],
+  );
+
   return (
     <div className="ribbon-panel">
-      {/* Clipboard: large Paste + stacked Undo/Redo */}
+      {/* Clipboard */}
       <RibbonGroup label="Clipboard">
-        <ToolbarButton label="📋" title="Paste" size="lg" onClick={noop} />
+        <ToolbarButton label="Paste" title="Paste (Ctrl+V)" size="lg" onClick={onPaste ?? (() => {})} />
         <div className="ribbon-col">
           <div className="ribbon-row">
-            <ToolbarButton label="✂" title="Cut" onClick={noop} />
-            <ToolbarButton label="⎘" title="Copy" onClick={noop} />
+            <ToolbarButton label="Cut" title="Cut (Ctrl+X)" onClick={onCut ?? (() => {})} />
+            <ToolbarButton label="Copy" title="Copy (Ctrl+C)" onClick={onCopy ?? (() => {})} />
           </div>
           <div className="ribbon-row">
             <ToolbarButton
-              label="↩"
+              label="Undo"
               title="Undo (Ctrl+Z)"
               onClick={() => dispatch({ type: 'undo' })}
             />
             <ToolbarButton
-              label="↪"
+              label="Redo"
               title="Redo (Ctrl+Y)"
               onClick={() => dispatch({ type: 'redo' })}
             />
@@ -107,7 +141,7 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
         </div>
       </RibbonGroup>
 
-      {/* Font: Row 1 = dropdown + size + grow/shrink; Row 2 = B/I/U + color */}
+      {/* Font */}
       <RibbonGroup label="Font">
         <div className="ribbon-col">
           <div className="ribbon-row">
@@ -127,8 +161,16 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
               step={0.5}
               onChange={handleFontSize}
             />
-            <ToolbarButton label="A↑" title="Grow Font" onClick={noop} />
-            <ToolbarButton label="A↓" title="Shrink Font" onClick={noop} />
+            <ToolbarButton
+              label="A+"
+              title="Grow Font (Ctrl+])"
+              onClick={() => dispatch({ type: 'grow_font' })}
+            />
+            <ToolbarButton
+              label="A-"
+              title="Shrink Font (Ctrl+[)"
+              onClick={() => dispatch({ type: 'shrink_font' })}
+            />
           </div>
           <div className="ribbon-row">
             <ToolbarButton
@@ -149,6 +191,24 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
               active={rp?.underline === true}
               onClick={() => dispatch({ type: 'toggle_underline' })}
             />
+            <ToolbarButton
+              label="S"
+              title="Strikethrough (Ctrl+Shift+X)"
+              active={rp?.strikethrough === true}
+              onClick={() => dispatch({ type: 'toggle_strikethrough' })}
+            />
+            <ToolbarButton
+              label="x2"
+              title="Subscript (Ctrl+=)"
+              active={rp?.subscript === true}
+              onClick={() => dispatch({ type: 'toggle_subscript' })}
+            />
+            <ToolbarButton
+              label="x2"
+              title="Superscript (Ctrl+Shift+=)"
+              active={rp?.superscript === true}
+              onClick={() => dispatch({ type: 'toggle_superscript' })}
+            />
             <input
               type="color"
               className="toolbar-color"
@@ -156,11 +216,18 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
               value={rp?.color ? `#${rp.color.replace('#', '')}` : '#000000'}
               onChange={handleColor}
             />
+            <input
+              type="color"
+              className="toolbar-color"
+              title="Highlight color"
+              value={rp?.background_color ? `#${rp.background_color.replace('#', '')}` : '#FFFF00'}
+              onChange={handleHighlight}
+            />
           </div>
         </div>
       </RibbonGroup>
 
-      {/* Paragraph: Row 1 = bullets/numbering/indent; Row 2 = alignment */}
+      {/* Paragraph */}
       <RibbonGroup label="Paragraph">
         <div className="ribbon-col">
           <div className="ribbon-row">
@@ -176,31 +243,45 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
               active={pp?.numbering?.num_id === '2'}
               onClick={() => dispatch({ type: 'toggle_numbered_list' })}
             />
-            <ToolbarButton label="◁" title="Decrease Indent" onClick={noop} />
-            <ToolbarButton label="▷" title="Increase Indent" onClick={noop} />
+            <ToolbarButton
+              label="&lt;"
+              title="Decrease Indent (Shift+Tab)"
+              onClick={() => dispatch({ type: 'decrease_indent' })}
+            />
+            <ToolbarButton
+              label="&gt;"
+              title="Increase Indent (Tab)"
+              onClick={() => dispatch({ type: 'increase_indent' })}
+            />
+            <ToolbarDropdown
+              label="Line Spacing"
+              value={String(pp?.line_spacing ?? 240)}
+              options={LINE_SPACING_OPTIONS}
+              onChange={handleLineSpacing}
+            />
           </div>
           <div className="ribbon-row">
             <ToolbarButton
               label="&#8676;"
-              title="Align Left"
+              title="Align Left (Ctrl+L)"
               active={pp?.alignment === 'left' || !pp?.alignment}
               onClick={() => dispatch({ type: 'set_alignment', payload: { alignment: 'left' } })}
             />
             <ToolbarButton
               label="&#8703;"
-              title="Align Center"
+              title="Align Center (Ctrl+E)"
               active={pp?.alignment === 'center'}
               onClick={() => dispatch({ type: 'set_alignment', payload: { alignment: 'center' } })}
             />
             <ToolbarButton
               label="&#8677;"
-              title="Align Right"
+              title="Align Right (Ctrl+R)"
               active={pp?.alignment === 'right'}
               onClick={() => dispatch({ type: 'set_alignment', payload: { alignment: 'right' } })}
             />
             <ToolbarButton
               label="&#8700;"
-              title="Justify"
+              title="Justify (Ctrl+J)"
               active={pp?.alignment === 'justify'}
               onClick={() => dispatch({ type: 'set_alignment', payload: { alignment: 'justify' } })}
             />
@@ -208,7 +289,7 @@ export const HomeRibbon: React.FC<HomeRibbonProps> = ({ dispatch, selection, doc
         </div>
       </RibbonGroup>
 
-      {/* Styles: heading dropdown */}
+      {/* Styles */}
       <RibbonGroup label="Styles">
         <div className="ribbon-col">
           <div className="ribbon-row">

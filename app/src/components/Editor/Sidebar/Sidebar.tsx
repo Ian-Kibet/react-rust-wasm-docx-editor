@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { OutlinePanel } from './OutlinePanel';
 import { PropertiesPanel } from './PropertiesPanel';
 import { StylesPanel } from './StylesPanel';
+import { CommentsPanel } from '../Comments/CommentsPanel';
 import { DocxDocument } from '../../../types/document';
 import { EditorSelection } from '../../../types/editor';
 
@@ -10,15 +11,17 @@ interface SidebarProps {
   selection: EditorSelection | null;
   collapsed: boolean;
   onToggle: () => void;
+  dispatch: React.Dispatch<any>;
 }
 
-type Tab = 'outline' | 'properties' | 'styles';
+type Tab = 'outline' | 'properties' | 'styles' | 'comments';
 
 export const Sidebar: React.FC<SidebarProps> = ({
   document: doc,
   selection,
   collapsed,
   onToggle,
+  dispatch,
 }) => {
   const [tab, setTab] = useState<Tab>('outline');
 
@@ -48,6 +51,12 @@ export const Sidebar: React.FC<SidebarProps> = ({
             >
               Styles
             </button>
+            <button
+              className={tab === 'comments' ? 'active' : ''}
+              onClick={() => setTab('comments')}
+            >
+              Comments
+            </button>
           </div>
           <div className="sidebar-content">
             {tab === 'outline' && <OutlinePanel document={doc} />}
@@ -55,6 +64,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
               <PropertiesPanel document={doc} selection={selection} />
             )}
             {tab === 'styles' && <StylesPanel document={doc} />}
+            {tab === 'comments' && (
+              <CommentsPanel document={doc} dispatch={dispatch} />
+            )}
           </div>
         </>
       )}

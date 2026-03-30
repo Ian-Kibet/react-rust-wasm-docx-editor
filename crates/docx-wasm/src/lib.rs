@@ -1,25 +1,73 @@
-pub mod model;
-pub mod parser;
-pub mod generator;
+mod abstract_numbering;
+mod adaptors;
+mod comment;
+mod delete;
+mod doc;
+mod footer;
+mod frame_property;
+mod header;
+mod hyperlink;
+mod insert;
+mod json_to_docx;
+mod level;
+mod level_override;
+mod line_spacing;
+mod num_pages;
+mod numbering;
+mod page_margin;
+mod page_num;
+mod page_num_type;
+mod paragraph;
+mod paragraph_property;
+mod pic;
+mod positional_tab;
+mod reader;
+mod run;
+mod run_fonts;
+mod run_property;
+mod style;
+mod table;
+mod table_cell;
+mod table_cell_border;
+mod table_of_contents;
+mod table_of_contents_item;
+mod table_position_property;
+mod table_row;
+mod web_extension;
 
-use wasm_bindgen::prelude::*;
-
-#[wasm_bindgen]
-pub fn parse_docx(data: &[u8]) -> Result<String, JsError> {
-    let doc = parser::parse(data).map_err(|e| JsError::new(&e.to_string()))?;
-    let json = serde_json::to_string(&doc).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(json)
-}
-
-#[wasm_bindgen]
-pub fn generate_docx(json: &str) -> Result<js_sys::Uint8Array, JsError> {
-    let doc: model::Document =
-        serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-    let bytes = generator::generate(&doc).map_err(|e| JsError::new(&e.to_string()))?;
-    Ok(js_sys::Uint8Array::from(&bytes[..]))
-}
-
-#[wasm_bindgen]
-pub fn version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
-}
+pub use abstract_numbering::*;
+pub use adaptors::*;
+pub use comment::*;
+pub use delete::*;
+pub use doc::*;
+pub use footer::*;
+pub use frame_property::*;
+pub use header::*;
+pub use hyperlink::*;
+pub use insert::*;
+pub use json_to_docx::*;
+pub use level::*;
+pub use level_override::*;
+pub use line_spacing::*;
+pub use num_pages::*;
+pub use numbering::*;
+pub use page_margin::*;
+pub use page_num::*;
+pub use page_num_type::*;
+pub use paragraph::*;
+pub use paragraph_property::*;
+pub use pic::*;
+pub use positional_tab::*;
+pub use reader::*;
+pub use run::*;
+pub use run_fonts::*;
+pub use run_property::*;
+pub use style::*;
+pub use table::*;
+pub use table_cell::*;
+pub use table_cell_border::*;
+pub use table_of_contents::*;
+pub use table_of_contents_item::*;
+pub use table_position_property::*;
+pub use table_row::*;
+pub use web_extension::*;

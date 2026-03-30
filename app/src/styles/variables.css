@@ -9,6 +9,9 @@
   --color-hover: #e8e8e8;
   --color-active: #d0d0d0;
   --color-danger: #dc2626;
+  --color-warning: #f59e0b;
+  --color-success: #10b981;
+  --color-comment-bg: #fef3cd;
 
   --toolbar-height: 48px;
   --filebar-height: 40px;
@@ -16,12 +19,14 @@
   --ribbon-panel-height: 90px;
   --ruler-height: 24px;
   --sidebar-width: 260px;
+  --statusbar-height: 28px;
   --editor-max-width: 816px;
 
   --radius-sm: 4px;
   --radius-md: 6px;
   --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.1);
   --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.12);
+  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.16);
 
   --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   --font-mono: 'SF Mono', 'Fira Code', monospace;
